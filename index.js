@@ -1,35 +1,37 @@
-var deepFreezeEs6 = {exports: {}};
+/* eslint-disable no-multi-assign */
 
 function deepFreeze(obj) {
-    if (obj instanceof Map) {
-        obj.clear = obj.delete = obj.set = function () {
-            throw new Error('map is read-only');
+  if (obj instanceof Map) {
+    obj.clear =
+      obj.delete =
+      obj.set =
+        function () {
+          throw new Error('map is read-only');
         };
-    } else if (obj instanceof Set) {
-        obj.add = obj.clear = obj.delete = function () {
-            throw new Error('set is read-only');
+  } else if (obj instanceof Set) {
+    obj.add =
+      obj.clear =
+      obj.delete =
+        function () {
+          throw new Error('set is read-only');
         };
+  }
+
+  // Freeze self
+  Object.freeze(obj);
+
+  Object.getOwnPropertyNames(obj).forEach((name) => {
+    const prop = obj[name];
+    const type = typeof prop;
+
+    // Freeze prop if it is an object or function and also not already frozen
+    if ((type === 'object' || type === 'function') && !Object.isFrozen(prop)) {
+      deepFreeze(prop);
     }
+  });
 
-    // Freeze self
-    Object.freeze(obj);
-
-    Object.getOwnPropertyNames(obj).forEach(function (name) {
-        var prop = obj[name];
-
-        // Freeze prop if it is an object
-        if (typeof prop == 'object' && !Object.isFrozen(prop)) {
-            deepFreeze(prop);
-        }
-    });
-
-    return obj;
+  return obj;
 }
-
-deepFreezeEs6.exports = deepFreeze;
-deepFreezeEs6.exports.default = deepFreeze;
-
-var deepFreeze$1 = deepFreezeEs6.exports;
 
 /** @typedef {import('highlight.js').CallbackResponse} CallbackResponse */
 /** @typedef {import('highlight.js').CompiledMode} CompiledMode */
@@ -96,7 +98,7 @@ function inherit$1(original, ...objects) {
  * @property {() => string} value
  */
 
-/** @typedef {{kind?: string, sublanguage?: boolean}} Node */
+/** @typedef {{scope?: string, language?: string, sublanguage?: boolean}} Node */
 /** @typedef {{walk: (r: Renderer) => void}} Tree */
 /** */
 
@@ -107,7 +109,9 @@ const SPAN_CLOSE = '</span>';
  *
  * @param {Node} node */
 const emitsWrappingTags = (node) => {
-  return !!node.kind;
+  // rarely we can have a sublanguage where language is undefined
+  // TODO: track down why
+  return !!node.scope;
 };
 
 /**
@@ -115,7 +119,12 @@ const emitsWrappingTags = (node) => {
  * @param {string} name
  * @param {{prefix:string}} options
  */
-const expandScopeName = (name, { prefix }) => {
+const scopeToCSSClass = (name, { prefix }) => {
+  // sub-language
+  if (name.startsWith("language:")) {
+    return name.replace("language:", "language-");
+  }
+  // tiered scope: comment.line
   if (name.includes(".")) {
     const pieces = name.split(".");
     return [
@@ -123,6 +132,7 @@ const expandScopeName = (name, { prefix }) => {
       ...(pieces.map((x, i) => `${x}${"_".repeat(i + 1)}`))
     ].join(" ");
   }
+  // simple scope
   return `${prefix}${name}`;
 };
 
@@ -155,13 +165,9 @@ class HTMLRenderer {
   openNode(node) {
     if (!emitsWrappingTags(node)) return;
 
-    let scope = node.kind;
-    if (node.sublanguage) {
-      scope = `language-${scope}`;
-    } else {
-      scope = expandScopeName(scope, { prefix: this.classPrefix });
-    }
-    this.span(scope);
+    const className = scopeToCSSClass(node.scope,
+      { prefix: this.classPrefix });
+    this.span(className);
   }
 
   /**
@@ -192,15 +198,23 @@ class HTMLRenderer {
   }
 }
 
-/** @typedef {{kind?: string, sublanguage?: boolean, children: Node[]} | string} Node */
-/** @typedef {{kind?: string, sublanguage?: boolean, children: Node[]} } DataNode */
+/** @typedef {{scope?: string, language?: string, children: Node[]} | string} Node */
+/** @typedef {{scope?: string, language?: string, children: Node[]} } DataNode */
 /** @typedef {import('highlight.js').Emitter} Emitter */
 /**  */
+
+/** @returns {DataNode} */
+const newNode = (opts = {}) => {
+  /** @type DataNode */
+  const result = { children: [] };
+  Object.assign(result, opts);
+  return result;
+};
 
 class TokenTree {
   constructor() {
     /** @type DataNode */
-    this.rootNode = { children: [] };
+    this.rootNode = newNode();
     this.stack = [this.rootNode];
   }
 
@@ -215,10 +229,10 @@ class TokenTree {
     this.top.children.push(node);
   }
 
-  /** @param {string} kind */
-  openNode(kind) {
+  /** @param {string} scope */
+  openNode(scope) {
     /** @type Node */
-    const node = { kind, children: [] };
+    const node = newNode({ scope });
     this.add(node);
     this.stack.push(node);
   }
@@ -290,13 +304,11 @@ class TokenTree {
 
   Minimal interface:
 
-  - addKeyword(text, kind)
   - addText(text)
-  - addSublanguage(emitter, subLanguageName)
+  - __addSublanguage(emitter, subLanguageName)
+  - startScope(scope)
+  - endScope()
   - finalize()
-  - openNode(kind)
-  - closeNode()
-  - closeAllNodes()
   - toHTML()
 
 */
@@ -315,18 +327,6 @@ class TokenTreeEmitter extends TokenTree {
 
   /**
    * @param {string} text
-   * @param {string} kind
-   */
-  addKeyword(text, kind) {
-    if (text === "") { return; }
-
-    this.openNode(kind);
-    this.addText(text);
-    this.closeNode();
-  }
-
-  /**
-   * @param {string} text
    */
   addText(text) {
     if (text === "") { return; }
@@ -334,15 +334,24 @@ class TokenTreeEmitter extends TokenTree {
     this.add(text);
   }
 
+  /** @param {string} scope */
+  startScope(scope) {
+    this.openNode(scope);
+  }
+
+  endScope() {
+    this.closeNode();
+  }
+
   /**
    * @param {Emitter & {root: DataNode}} emitter
    * @param {string} name
    */
-  addSublanguage(emitter, name) {
+  __addSublanguage(emitter, name) {
     /** @type DataNode */
     const node = emitter.root;
-    node.kind = name;
-    node.sublanguage = true;
+    if (name) node.scope = `language:${name}`;
+
     this.add(node);
   }
 
@@ -352,6 +361,7 @@ class TokenTreeEmitter extends TokenTree {
   }
 
   finalize() {
+    this.closeAllNodes();
     return true;
   }
 }
@@ -656,28 +666,18 @@ const BINARY_NUMBER_MODE = {
   relevance: 0
 };
 const REGEXP_MODE = {
-  // this outer rule makes sure we actually have a WHOLE regex and not simply
-  // an expression such as:
-  //
-  //     3 / something
-  //
-  // (which will then blow up when regex's `illegal` sees the newline)
-  begin: /(?=\/[^/\n]*\/)/,
-  contains: [{
-    scope: 'regexp',
-    begin: /\//,
-    end: /\/[gimuy]*/,
-    illegal: /\n/,
-    contains: [
-      BACKSLASH_ESCAPE,
-      {
-        begin: /\[/,
-        end: /\]/,
-        relevance: 0,
-        contains: [BACKSLASH_ESCAPE]
-      }
-    ]
-  }]
+  scope: "regexp",
+  begin: /\/(?=[^/\n]*\/)/,
+  end: /\/[gimuy]*/,
+  contains: [
+    BACKSLASH_ESCAPE,
+    {
+      begin: /\[/,
+      end: /\]/,
+      relevance: 0,
+      contains: [BACKSLASH_ESCAPE]
+    }
+  ]
 };
 const TITLE_MODE = {
   scope: 'title',
@@ -713,31 +713,31 @@ const END_SAME_AS_BEGIN = function(mode) {
 };
 
 var MODES = /*#__PURE__*/Object.freeze({
-    __proto__: null,
-    MATCH_NOTHING_RE: MATCH_NOTHING_RE,
-    IDENT_RE: IDENT_RE,
-    UNDERSCORE_IDENT_RE: UNDERSCORE_IDENT_RE,
-    NUMBER_RE: NUMBER_RE,
-    C_NUMBER_RE: C_NUMBER_RE,
-    BINARY_NUMBER_RE: BINARY_NUMBER_RE,
-    RE_STARTERS_RE: RE_STARTERS_RE,
-    SHEBANG: SHEBANG,
-    BACKSLASH_ESCAPE: BACKSLASH_ESCAPE,
-    APOS_STRING_MODE: APOS_STRING_MODE,
-    QUOTE_STRING_MODE: QUOTE_STRING_MODE,
-    PHRASAL_WORDS_MODE: PHRASAL_WORDS_MODE,
-    COMMENT: COMMENT,
-    C_LINE_COMMENT_MODE: C_LINE_COMMENT_MODE,
-    C_BLOCK_COMMENT_MODE: C_BLOCK_COMMENT_MODE,
-    HASH_COMMENT_MODE: HASH_COMMENT_MODE,
-    NUMBER_MODE: NUMBER_MODE,
-    C_NUMBER_MODE: C_NUMBER_MODE,
-    BINARY_NUMBER_MODE: BINARY_NUMBER_MODE,
-    REGEXP_MODE: REGEXP_MODE,
-    TITLE_MODE: TITLE_MODE,
-    UNDERSCORE_TITLE_MODE: UNDERSCORE_TITLE_MODE,
-    METHOD_GUARD: METHOD_GUARD,
-    END_SAME_AS_BEGIN: END_SAME_AS_BEGIN
+  __proto__: null,
+  APOS_STRING_MODE: APOS_STRING_MODE,
+  BACKSLASH_ESCAPE: BACKSLASH_ESCAPE,
+  BINARY_NUMBER_MODE: BINARY_NUMBER_MODE,
+  BINARY_NUMBER_RE: BINARY_NUMBER_RE,
+  COMMENT: COMMENT,
+  C_BLOCK_COMMENT_MODE: C_BLOCK_COMMENT_MODE,
+  C_LINE_COMMENT_MODE: C_LINE_COMMENT_MODE,
+  C_NUMBER_MODE: C_NUMBER_MODE,
+  C_NUMBER_RE: C_NUMBER_RE,
+  END_SAME_AS_BEGIN: END_SAME_AS_BEGIN,
+  HASH_COMMENT_MODE: HASH_COMMENT_MODE,
+  IDENT_RE: IDENT_RE,
+  MATCH_NOTHING_RE: MATCH_NOTHING_RE,
+  METHOD_GUARD: METHOD_GUARD,
+  NUMBER_MODE: NUMBER_MODE,
+  NUMBER_RE: NUMBER_RE,
+  PHRASAL_WORDS_MODE: PHRASAL_WORDS_MODE,
+  QUOTE_STRING_MODE: QUOTE_STRING_MODE,
+  REGEXP_MODE: REGEXP_MODE,
+  RE_STARTERS_RE: RE_STARTERS_RE,
+  SHEBANG: SHEBANG,
+  TITLE_MODE: TITLE_MODE,
+  UNDERSCORE_IDENT_RE: UNDERSCORE_IDENT_RE,
+  UNDERSCORE_TITLE_MODE: UNDERSCORE_TITLE_MODE
 });
 
 /**
@@ -891,7 +891,7 @@ const DEFAULT_KEYWORD_SCOPE = "keyword";
  * @param {boolean} caseInsensitive
  */
 function compileKeywords(rawKeywords, caseInsensitive, scopeName = DEFAULT_KEYWORD_SCOPE) {
-  /** @type KeywordDict */
+  /** @type {import("highlight.js/private").KeywordDict} */
   const compiledKeywords = Object.create(null);
 
   // input can be a string of keywords, an array of keywords, or a object with
@@ -1550,7 +1550,7 @@ function expandOrCloneMode(mode) {
   return mode;
 }
 
-var version = "11.5.1";
+var version = "11.10.0";
 
 class HTMLInjectionError extends Error {
   constructor(reason, html) {
@@ -1564,6 +1564,8 @@ class HTMLInjectionError extends Error {
 Syntax highlighting with language autodetection.
 https://highlightjs.org/
 */
+
+
 
 /**
 @typedef {import('highlight.js').Mode} Mode
@@ -1774,7 +1776,7 @@ const HLJS = function(hljs) {
             buf += match[0];
           } else {
             const cssClass = language.classNameAliases[kind] || kind;
-            emitter.addKeyword(match[0], cssClass);
+            emitKeyword(match[0], cssClass);
           }
         } else {
           buf += match[0];
@@ -1782,7 +1784,7 @@ const HLJS = function(hljs) {
         lastIndex = top.keywordPatternRe.lastIndex;
         match = top.keywordPatternRe.exec(modeBuffer);
       }
-      buf += modeBuffer.substr(lastIndex);
+      buf += modeBuffer.substring(lastIndex);
       emitter.addText(buf);
     }
 
@@ -1809,7 +1811,7 @@ const HLJS = function(hljs) {
       if (top.relevance > 0) {
         relevance += result.relevance;
       }
-      emitter.addSublanguage(result._emitter, result.language);
+      emitter.__addSublanguage(result._emitter, result.language);
     }
 
     function processBuffer() {
@@ -1819,6 +1821,18 @@ const HLJS = function(hljs) {
         processKeywords();
       }
       modeBuffer = '';
+    }
+
+    /**
+     * @param {string} text
+     * @param {string} scope
+     */
+    function emitKeyword(keyword, scope) {
+      if (keyword === "") return;
+
+      emitter.startScope(scope);
+      emitter.addText(keyword);
+      emitter.endScope();
     }
 
     /**
@@ -1833,7 +1847,7 @@ const HLJS = function(hljs) {
         const klass = language.classNameAliases[scope[i]] || scope[i];
         const text = match[i];
         if (klass) {
-          emitter.addKeyword(text, klass);
+          emitKeyword(text, klass);
         } else {
           modeBuffer = text;
           processKeywords();
@@ -1854,7 +1868,7 @@ const HLJS = function(hljs) {
       if (mode.beginScope) {
         // beginScope just wraps the begin match itself in a scope
         if (mode.beginScope._wrap) {
-          emitter.addKeyword(modeBuffer, language.classNameAliases[mode.beginScope._wrap] || mode.beginScope._wrap);
+          emitKeyword(modeBuffer, language.classNameAliases[mode.beginScope._wrap] || mode.beginScope._wrap);
           modeBuffer = "";
         } else if (mode.beginScope._multi) {
           // at this point modeBuffer should just be the match
@@ -1957,7 +1971,7 @@ const HLJS = function(hljs) {
      */
     function doEndMatch(match) {
       const lexeme = match[0];
-      const matchPlusRemainder = codeToHighlight.substr(match.index);
+      const matchPlusRemainder = codeToHighlight.substring(match.index);
 
       const endMode = endOfMode(top, match, matchPlusRemainder);
       if (!endMode) { return NO_MATCH; }
@@ -1965,7 +1979,7 @@ const HLJS = function(hljs) {
       const origin = top;
       if (top.endScope && top.endScope._wrap) {
         processBuffer();
-        emitter.addKeyword(lexeme, top.endScope._wrap);
+        emitKeyword(lexeme, top.endScope._wrap);
       } else if (top.endScope && top.endScope._multi) {
         processBuffer();
         emitMultiClass(top.endScope, match);
@@ -2108,37 +2122,41 @@ const HLJS = function(hljs) {
     let resumeScanAtSamePosition = false;
 
     try {
-      top.matcher.considerAll();
+      if (!language.__emitTokens) {
+        top.matcher.considerAll();
 
-      for (;;) {
-        iterations++;
-        if (resumeScanAtSamePosition) {
-          // only regexes not matched previously will now be
-          // considered for a potential match
-          resumeScanAtSamePosition = false;
-        } else {
-          top.matcher.considerAll();
+        for (;;) {
+          iterations++;
+          if (resumeScanAtSamePosition) {
+            // only regexes not matched previously will now be
+            // considered for a potential match
+            resumeScanAtSamePosition = false;
+          } else {
+            top.matcher.considerAll();
+          }
+          top.matcher.lastIndex = index;
+
+          const match = top.matcher.exec(codeToHighlight);
+          // console.log("match", match[0], match.rule && match.rule.begin)
+
+          if (!match) break;
+
+          const beforeMatch = codeToHighlight.substring(index, match.index);
+          const processedCount = processLexeme(beforeMatch, match);
+          index = match.index + processedCount;
         }
-        top.matcher.lastIndex = index;
-
-        const match = top.matcher.exec(codeToHighlight);
-        // console.log("match", match[0], match.rule && match.rule.begin)
-
-        if (!match) break;
-
-        const beforeMatch = codeToHighlight.substring(index, match.index);
-        const processedCount = processLexeme(beforeMatch, match);
-        index = match.index + processedCount;
+        processLexeme(codeToHighlight.substring(index));
+      } else {
+        language.__emitTokens(codeToHighlight, emitter);
       }
-      processLexeme(codeToHighlight.substr(index));
-      emitter.closeAllNodes();
+
       emitter.finalize();
       result = emitter.toHTML();
 
       return {
         language: languageName,
         value: result,
-        relevance: relevance,
+        relevance,
         illegal: false,
         _emitter: emitter,
         _top: top
@@ -2152,7 +2170,7 @@ const HLJS = function(hljs) {
           relevance: 0,
           _illegalBy: {
             message: err.message,
-            index: index,
+            index,
             context: codeToHighlight.slice(index - 100, index + 100),
             mode: err.mode,
             resultSoFar: result
@@ -2274,7 +2292,12 @@ const HLJS = function(hljs) {
     if (shouldNotHighlight(language)) return;
 
     fire("before:highlightElement",
-      { el: element, language: language });
+      { el: element, language });
+
+    if (element.dataset.highlighted) {
+      console.log("Element previously highlighted. To highlight again, first unset `dataset.highlighted`.", element);
+      return;
+    }
 
     // we should be all text, no child nodes (unescaped HTML) - this is possibly
     // an HTML injection attack - it's likely too late if this is already in
@@ -2302,6 +2325,7 @@ const HLJS = function(hljs) {
     const result = language ? highlight(text, { language, ignoreIllegals: true }) : highlightAuto(text);
 
     element.innerHTML = result.value;
+    element.dataset.highlighted = "yes";
     updateClassName(element, language, result.language);
     element.result = {
       language: result.language,
@@ -2479,6 +2503,16 @@ const HLJS = function(hljs) {
   }
 
   /**
+   * @param {HLJSPlugin} plugin
+   */
+  function removePlugin(plugin) {
+    const index = plugins.indexOf(plugin);
+    if (index !== -1) {
+      plugins.splice(index, 1);
+    }
+  }
+
+  /**
    *
    * @param {PluginEvent} event
    * @param {any} args
@@ -2521,7 +2555,8 @@ const HLJS = function(hljs) {
     registerAliases,
     autoDetection,
     inherit,
-    addPlugin
+    addPlugin,
+    removePlugin
   });
 
   hljs.debugMode = function() { SAFE_MODE = false; };
@@ -2540,7 +2575,7 @@ const HLJS = function(hljs) {
     // @ts-ignore
     if (typeof MODES[key] === "object") {
       // @ts-ignore
-      deepFreeze$1(MODES[key]);
+      deepFreeze(MODES[key]);
     }
   }
 
@@ -2550,8 +2585,12 @@ const HLJS = function(hljs) {
   return hljs;
 };
 
-// export an "instance" of the highlighter
-var highlight = HLJS({});
+// Other names for the variable may break build script
+const highlight = HLJS({});
+
+// returns a new instance of the highlighter to be used for extensions
+// check https://github.com/wooorm/lowlight/issues/47
+highlight.newInstance = () => HLJS({});
 
 var core = highlight;
 highlight.HighlightJS = highlight;
@@ -3008,6 +3047,12 @@ function require_1c () {
 	    ]
 	  };
 
+	  const PUNCTUATION = {
+	    match: /[;()+\-:=,]/,
+	    className: "punctuation",
+	    relevance: 0
+	  };
+
 	  // comment : комментарии
 	  const COMMENTS = hljs.inherit(hljs.C_LINE_COMMENT_MODE);
 
@@ -3094,7 +3139,8 @@ function require_1c () {
 	      SYMBOL,
 	      NUMBERS,
 	      STRINGS,
-	      DATE
+	      DATE,
+	      PUNCTUATION
 	    ]
 	  };
 	}
@@ -3107,6 +3153,7 @@ function require_1c () {
 Language: Augmented Backus-Naur Form
 Author: Alex McKibben <alex@nullscope.net>
 Website: https://tools.ietf.org/html/rfc5234
+Category: syntax
 Audit: 2020
 */
 
@@ -4202,34 +4249,44 @@ function requireArcade () {
 	hasRequiredArcade = 1;
 	/** @type LanguageFn */
 	function arcade(hljs) {
+	  const regex = hljs.regex;
 	  const IDENT_RE = '[A-Za-z_][0-9A-Za-z_]*';
 	  const KEYWORDS = {
 	    keyword: [
-	      "if",
-	      "for",
-	      "while",
-	      "var",
-	      "new",
-	      "function",
+	      "break",
+	      "case",
+	      "catch",
+	      "continue",
+	      "debugger",
 	      "do",
-	      "return",
-	      "void",
 	      "else",
-	      "break"
+	      "export",
+	      "for",
+	      "function",
+	      "if",
+	      "import",
+	      "in",
+	      "new",
+	      "return",
+	      "switch",
+	      "try",
+	      "var",
+	      "void",
+	      "while"
 	    ],
 	    literal: [
 	      "BackSlash",
 	      "DoubleQuote",
-	      "false",
 	      "ForwardSlash",
 	      "Infinity",
 	      "NaN",
 	      "NewLine",
-	      "null",
 	      "PI",
 	      "SingleQuote",
 	      "Tab",
 	      "TextFormatting",
+	      "false",
+	      "null",
 	      "true",
 	      "undefined"
 	    ],
@@ -4254,19 +4311,22 @@ function requireArcade () {
 	      "BufferGeodetic",
 	      "Ceil",
 	      "Centroid",
+	      "ChangeTimeZone",
 	      "Clip",
 	      "Concatenate",
 	      "Console",
 	      "Constrain",
 	      "Contains",
 	      "ConvertDirection",
+	      "ConvexHull",
 	      "Cos",
 	      "Count",
 	      "Crosses",
 	      "Cut",
-	      "Date",
+	      "Date|0",
 	      "DateAdd",
 	      "DateDiff",
+	      "DateOnly",
 	      "Day",
 	      "Decode",
 	      "DefaultValue",
@@ -4293,25 +4353,34 @@ function requireArcade () {
 	      "FeatureSetById",
 	      "FeatureSetByName",
 	      "FeatureSetByPortalItem",
+	      "FeatureSetByRelationshipClass",
 	      "FeatureSetByRelationshipName",
 	      "Filter",
 	      "Find",
-	      "First",
+	      "First|0",
 	      "Floor",
 	      "FromCharCode",
 	      "FromCodePoint",
 	      "FromJSON",
+	      "Front",
 	      "GdbVersion",
 	      "Generalize",
 	      "Geometry",
+	      "GetEnvironment",
 	      "GetFeatureSet",
+	      "GetFeatureSetInfo",
 	      "GetUser",
 	      "GroupBy",
 	      "Guid",
-	      "Hash",
 	      "HasKey",
+	      "HasValue",
+	      "Hash",
 	      "Hour",
 	      "IIf",
+	      "ISOMonth",
+	      "ISOWeek",
+	      "ISOWeekday",
+	      "ISOYear",
 	      "Includes",
 	      "IndexOf",
 	      "Insert",
@@ -4319,10 +4388,6 @@ function requireArcade () {
 	      "Intersects",
 	      "IsEmpty",
 	      "IsNan",
-	      "ISOMonth",
-	      "ISOWeek",
-	      "ISOWeekday",
-	      "ISOYear",
 	      "IsSelfIntersecting",
 	      "IsSimple",
 	      "Left|0",
@@ -4341,11 +4406,13 @@ function requireArcade () {
 	      "Month",
 	      "MultiPartToSinglePart",
 	      "Multipoint",
+	      "NearestCoordinate",
+	      "NearestVertex",
 	      "NextSequenceValue",
 	      "None",
 	      "Now",
 	      "Number",
-	      "Offset|0",
+	      "Offset",
 	      "OrderBy",
 	      "Overlaps",
 	      "Point",
@@ -4376,6 +4443,7 @@ function requireArcade () {
 	      "Splice",
 	      "Split",
 	      "Sqrt",
+	      "StandardizeGuid",
 	      "Stdev",
 	      "SubtypeCode",
 	      "SubtypeName",
@@ -4384,15 +4452,18 @@ function requireArcade () {
 	      "SymmetricDifference",
 	      "Tan",
 	      "Text",
+	      "Time",
+	      "TimeZone",
+	      "TimeZoneOffset",
 	      "Timestamp",
 	      "ToCharCode",
 	      "ToCodePoint",
-	      "Today",
 	      "ToHex",
 	      "ToLocal",
+	      "ToUTC",
+	      "Today",
 	      "Top|0",
 	      "Touches",
-	      "ToUTC",
 	      "TrackAccelerationAt",
 	      "TrackAccelerationWindow",
 	      "TrackCurrentAcceleration",
@@ -4417,14 +4488,46 @@ function requireArcade () {
 	      "Variance",
 	      "Week",
 	      "Weekday",
-	      "When",
+	      "When|0",
 	      "Within",
-	      "Year"
+	      "Year|0",
 	    ]
 	  };
+	  const PROFILE_VARS = [
+	    "aggregatedFeatures",
+	    "analytic",
+	    "config",
+	    "datapoint",
+	    "datastore",
+	    "editcontext",
+	    "feature",
+	    "featureSet",
+	    "feedfeature",
+	    "fencefeature",
+	    "fencenotificationtype",
+	    "join",
+	    "layer",
+	    "locationupdate",
+	    "map",
+	    "measure",
+	    "measure",
+	    "originalFeature",
+	    "record",
+	    "reference",
+	    "rowindex",
+	    "sourcedatastore",
+	    "sourcefeature",
+	    "sourcelayer",
+	    "target",
+	    "targetdatastore",
+	    "targetfeature",
+	    "targetlayer",
+	    "value",
+	    "view"
+	  ];
 	  const SYMBOL = {
 	    className: 'symbol',
-	    begin: '\\$[datastore|feature|layer|map|measure|sourcefeature|sourcelayer|targetfeature|targetlayer|value|view]+'
+	    begin: '\\$' + regex.either(...PROFILE_VARS)
 	  };
 	  const NUMBER = {
 	    className: 'number',
@@ -4616,9 +4719,44 @@ function requireArduino () {
 	  const NUMBERS = {
 	    className: 'number',
 	    variants: [
-	      { begin: '\\b(0b[01\']+)' },
-	      { begin: '(-?)\\b([\\d\']+(\\.[\\d\']*)?|\\.[\\d\']+)((ll|LL|l|L)(u|U)?|(u|U)(ll|LL|l|L)?|f|F|b|B)' },
-	      { begin: '(-?)(\\b0[xX][a-fA-F0-9\']+|(\\b[\\d\']+(\\.[\\d\']*)?|\\.[\\d\']+)([eE][-+]?[\\d\']+)?)' }
+	      // Floating-point literal.
+	      { begin:
+	        "[+-]?(?:" // Leading sign.
+	          // Decimal.
+	          + "(?:"
+	            +"[0-9](?:'?[0-9])*\\.(?:[0-9](?:'?[0-9])*)?"
+	            + "|\\.[0-9](?:'?[0-9])*"
+	          + ")(?:[Ee][+-]?[0-9](?:'?[0-9])*)?"
+	          + "|[0-9](?:'?[0-9])*[Ee][+-]?[0-9](?:'?[0-9])*"
+	          // Hexadecimal.
+	          + "|0[Xx](?:"
+	            +"[0-9A-Fa-f](?:'?[0-9A-Fa-f])*(?:\\.(?:[0-9A-Fa-f](?:'?[0-9A-Fa-f])*)?)?"
+	            + "|\\.[0-9A-Fa-f](?:'?[0-9A-Fa-f])*"
+	          + ")[Pp][+-]?[0-9](?:'?[0-9])*"
+	        + ")(?:" // Literal suffixes.
+	          + "[Ff](?:16|32|64|128)?"
+	          + "|(BF|bf)16"
+	          + "|[Ll]"
+	          + "|" // Literal suffix is optional.
+	        + ")"
+	      },
+	      // Integer literal.
+	      { begin:
+	        "[+-]?\\b(?:" // Leading sign.
+	          + "0[Bb][01](?:'?[01])*" // Binary.
+	          + "|0[Xx][0-9A-Fa-f](?:'?[0-9A-Fa-f])*" // Hexadecimal.
+	          + "|0(?:'?[0-7])*" // Octal or just a lone zero.
+	          + "|[1-9](?:'?[0-9])*" // Decimal.
+	        + ")(?:" // Literal suffixes.
+	          + "[Uu](?:LL?|ll?)"
+	          + "|[Uu][Zz]?"
+	          + "|(?:LL?|ll?)[Uu]?"
+	          + "|[Zz][Uu]"
+	          + "|" // Literal suffix is optional.
+	        + ")"
+	        // Note: there are user-defined literal suffixes too, but perhaps having the custom suffix not part of the
+	        // literal highlight actually makes it stand out more.
+	      }
 	    ],
 	    relevance: 0
 	  };
@@ -5134,7 +5272,9 @@ function requireArduino () {
 	Author: Stefania Mellai <s.mellai@arduino.cc>
 	Description: The Arduino® Language is a superset of C++. This rules are designed to highlight the Arduino® source code. For info about language see http://www.arduino.cc.
 	Website: https://www.arduino.cc
+	Category: system
 	*/
+
 
 	/** @type LanguageFn */
 	function arduino(hljs) {
@@ -5574,6 +5714,10 @@ function requireArmasm () {
 	        + 'ALIAS ALIGN ARM AREA ASSERT ATTR CN CODE CODE16 CODE32 COMMON CP DATA DCB DCD DCDU DCDO DCFD DCFDU DCI DCQ DCQU DCW DCWU DN ELIF ELSE END ENDFUNC ENDIF ENDP ENTRY EQU EXPORT EXPORTAS EXTERN FIELD FILL FUNCTION GBLA GBLL GBLS GET GLOBAL IF IMPORT INCBIN INCLUDE INFO KEEP LCLA LCLL LCLS LTORG MACRO MAP MEND MEXIT NOFP OPT PRESERVE8 PROC QN READONLY RELOC REQUIRE REQUIRE8 RLIST FN ROUT SETA SETL SETS SN SPACE SUBT THUMB THUMBX TTL WHILE WEND ',
 	      built_in:
 	        'r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 ' // standard registers
+	        + 'w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 w12 w13 w14 w15 ' // 32 bit ARMv8 registers
+	        + 'w16 w17 w18 w19 w20 w21 w22 w23 w24 w25 w26 w27 w28 w29 w30 '
+	        + 'x0 x1 x2 x3 x4 x5 x6 x7 x8 x9 x10 x11 x12 x13 x14 x15 ' // 64 bit ARMv8 registers
+	        + 'x16 x17 x18 x19 x20 x21 x22 x23 x24 x25 x26 x27 x28 x29 x30 '
 	        + 'pc lr sp ip sl sb fp ' // typical regs plus backward compatibility
 	        + 'a1 a2 a3 a4 v1 v2 v3 v4 v5 v6 v7 v8 f0 f1 f2 f3 f4 f5 f6 f7 ' // more regs and fp
 	        + 'p0 p1 p2 p3 p4 p5 p6 p7 p8 p9 p10 p11 p12 p13 p14 p15 ' // coprocessor regs
@@ -5679,9 +5823,15 @@ function requireXml () {
 	/** @type LanguageFn */
 	function xml(hljs) {
 	  const regex = hljs.regex;
-	  // Element names can contain letters, digits, hyphens, underscores, and periods
-	  const TAG_NAME_RE = regex.concat(/[A-Z_]/, regex.optional(/[A-Z0-9_.-]*:/), /[A-Z0-9_.-]*/);
-	  const XML_IDENT_RE = /[A-Za-z0-9._:-]+/;
+	  // XML names can have the following additional letters: https://www.w3.org/TR/xml/#NT-NameChar
+	  // OTHER_NAME_CHARS = /[:\-.0-9\u00B7\u0300-\u036F\u203F-\u2040]/;
+	  // Element names start with NAME_START_CHAR followed by optional other Unicode letters, ASCII digits, hyphens, underscores, and periods
+	  // const TAG_NAME_RE = regex.concat(/[A-Z_a-z\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u02FF\u0370-\u037D\u037F-\u1FFF\u200C-\u200D\u2070-\u218F\u2C00-\u2FEF\u3001-\uD7FF\uF900-\uFDCF\uFDF0-\uFFFD]/, regex.optional(/[A-Z_a-z\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u02FF\u0370-\u037D\u037F-\u1FFF\u200C-\u200D\u2070-\u218F\u2C00-\u2FEF\u3001-\uD7FF\uF900-\uFDCF\uFDF0-\uFFFD\-.0-9\u00B7\u0300-\u036F\u203F-\u2040]*:/), /[A-Z_a-z\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u02FF\u0370-\u037D\u037F-\u1FFF\u200C-\u200D\u2070-\u218F\u2C00-\u2FEF\u3001-\uD7FF\uF900-\uFDCF\uFDF0-\uFFFD\-.0-9\u00B7\u0300-\u036F\u203F-\u2040]*/);;
+	  // const XML_IDENT_RE = /[A-Z_a-z:\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u02FF\u0370-\u037D\u037F-\u1FFF\u200C-\u200D\u2070-\u218F\u2C00-\u2FEF\u3001-\uD7FF\uF900-\uFDCF\uFDF0-\uFFFD\-.0-9\u00B7\u0300-\u036F\u203F-\u2040]+/;
+	  // const TAG_NAME_RE = regex.concat(/[A-Z_a-z\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u02FF\u0370-\u037D\u037F-\u1FFF\u200C-\u200D\u2070-\u218F\u2C00-\u2FEF\u3001-\uD7FF\uF900-\uFDCF\uFDF0-\uFFFD]/, regex.optional(/[A-Z_a-z\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u02FF\u0370-\u037D\u037F-\u1FFF\u200C-\u200D\u2070-\u218F\u2C00-\u2FEF\u3001-\uD7FF\uF900-\uFDCF\uFDF0-\uFFFD\-.0-9\u00B7\u0300-\u036F\u203F-\u2040]*:/), /[A-Z_a-z\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u02FF\u0370-\u037D\u037F-\u1FFF\u200C-\u200D\u2070-\u218F\u2C00-\u2FEF\u3001-\uD7FF\uF900-\uFDCF\uFDF0-\uFFFD\-.0-9\u00B7\u0300-\u036F\u203F-\u2040]*/);
+	  // however, to cater for performance and more Unicode support rely simply on the Unicode letter class
+	  const TAG_NAME_RE = regex.concat(/[\p{L}_]/u, regex.optional(/[\p{L}0-9_.-]*:/u), /[\p{L}0-9_.-]*/u);
+	  const XML_IDENT_RE = /[\p{L}0-9._:-]+/u;
 	  const XML_ENTITIES = {
 	    className: 'symbol',
 	    begin: /&[a-z]+;|&#[0-9]+;|&#x[a-f0-9]+;/
@@ -5752,6 +5902,7 @@ function requireXml () {
 	      'svg'
 	    ],
 	    case_insensitive: true,
+	    unicodeRegex: true,
 	    contains: [
 	      {
 	        className: 'meta',
@@ -6181,6 +6332,7 @@ Language: AspectJ
 Author: Hakan Ozler <ozler.hakan@gmail.com>
 Website: https://www.eclipse.org/aspectj/
 Description: Syntax Highlighting for the AspectJ Language which is a general-purpose aspect-oriented extension to the Java programming language.
+Category: system
 Audit: 2020
 */
 
@@ -6778,6 +6930,7 @@ Language: Awk
 Author: Matthew Daly <matthewbdaly@gmail.com>
 Website: https://www.gnu.org/software/gawk/manual/gawk.html
 Description: language definition for Awk scripts
+Category: scripting
 */
 
 var awk_1;
@@ -7051,7 +7204,7 @@ Language: Bash
 Author: vah <vahtenberg@gmail.com>
 Contributrors: Benjamin Pannell <contact@sierrasoftworks.com>
 Website: https://www.gnu.org/software/bash/
-Category: common
+Category: common, scripting
 */
 
 var bash_1;
@@ -7092,6 +7245,18 @@ function requireBash () {
 	    end: /\)/,
 	    contains: [ hljs.BACKSLASH_ESCAPE ]
 	  };
+	  const COMMENT = hljs.inherit(
+	    hljs.COMMENT(),
+	    {
+	      match: [
+	        /(^|\s)/,
+	        /#.*$/
+	      ],
+	      scope: {
+	        2: 'comment'
+	      }
+	    }
+	  );
 	  const HERE_DOC = {
 	    begin: /<<-?\s*(?=\w+)/,
 	    starts: { contains: [
@@ -7114,17 +7279,18 @@ function requireBash () {
 	  };
 	  SUBST.contains.push(QUOTE_STRING);
 	  const ESCAPED_QUOTE = {
-	    className: '',
-	    begin: /\\"/
-
+	    match: /\\"/
 	  };
 	  const APOS_STRING = {
 	    className: 'string',
 	    begin: /'/,
 	    end: /'/
 	  };
+	  const ESCAPED_APOS = {
+	    match: /\\'/
+	  };
 	  const ARITHMETIC = {
-	    begin: /\$\(\(/,
+	    begin: /\$?\(\(/,
 	    end: /\)\)/,
 	    contains: [
 	      {
@@ -7166,12 +7332,14 @@ function requireBash () {
 	    "fi",
 	    "for",
 	    "while",
+	    "until",
 	    "in",
 	    "do",
 	    "done",
 	    "case",
 	    "esac",
-	    "function"
+	    "function",
+	    "select"
 	  ];
 
 	  const LITERALS = [
@@ -7222,6 +7390,7 @@ function requireBash () {
 	    "read",
 	    "readarray",
 	    "source",
+	    "sudo",
 	    "type",
 	    "typeset",
 	    "ulimit",
@@ -7407,7 +7576,10 @@ function requireBash () {
 
 	  return {
 	    name: 'Bash',
-	    aliases: [ 'sh' ],
+	    aliases: [
+	      'sh',
+	      'zsh'
+	    ],
 	    keywords: {
 	      $pattern: /\b[a-z][a-z0-9._-]+\b/,
 	      keyword: KEYWORDS,
@@ -7427,12 +7599,13 @@ function requireBash () {
 	      hljs.SHEBANG(), // to catch unknown shells but still highlight the shebang
 	      FUNCTION,
 	      ARITHMETIC,
-	      hljs.HASH_COMMENT_MODE,
+	      COMMENT,
 	      HERE_DOC,
 	      PATH_MODE,
 	      QUOTE_STRING,
 	      ESCAPED_QUOTE,
 	      APOS_STRING,
+	      ESCAPED_APOS,
 	      VAR
 	    ]
 	  };
@@ -7447,6 +7620,7 @@ Language: BASIC
 Author: Raphaël Assénat <raph@raphnet.net>
 Description: Based on the BASIC reference from the Tandy 1000 guide
 Website: https://en.wikipedia.org/wiki/Tandy_1000
+Category: system
 */
 
 var basic_1;
@@ -7683,6 +7857,7 @@ function requireBasic () {
 /*
 Language: Backus–Naur Form
 Website: https://en.wikipedia.org/wiki/Backus–Naur_form
+Category: syntax
 Author: Oleg Efimov <efimovov@gmail.com>
 */
 
@@ -7868,7 +8043,7 @@ function requireC () {
 	    end: /$/,
 	    keywords: { keyword:
 	        'if else elif endif define undef warning error line '
-	        + 'pragma _Pragma ifdef ifndef include' },
+	        + 'pragma _Pragma ifdef ifndef elifdef elifndef include' },
 	    contains: [
 	      {
 	        begin: /\\\n/,
@@ -7912,6 +8087,8 @@ function requireC () {
 	    "restrict",
 	    "return",
 	    "sizeof",
+	    "typeof",
+	    "typeof_unqual",
 	    "struct",
 	    "switch",
 	    "typedef",
@@ -7946,14 +8123,26 @@ function requireC () {
 	    "char",
 	    "void",
 	    "_Bool",
+	    "_BitInt",
 	    "_Complex",
 	    "_Imaginary",
 	    "_Decimal32",
 	    "_Decimal64",
+	    "_Decimal96",
 	    "_Decimal128",
+	    "_Decimal64x",
+	    "_Decimal128x",
+	    "_Float16",
+	    "_Float32",
+	    "_Float64",
+	    "_Float128",
+	    "_Float32x",
+	    "_Float64x",
+	    "_Float128x",
 	    // modifiers
 	    "const",
 	    "static",
+	    "constexpr",
 	    // aliases
 	    "complex",
 	    "bool",
@@ -8122,6 +8311,7 @@ Language: C/AL
 Author: Kenneth Fuglsang Christensen <kfuglsang@gmail.com>
 Description: Provides highlighting of Microsoft Dynamics NAV C/AL code files
 Website: https://docs.microsoft.com/en-us/dynamics-nav/programming-in-c-al
+Category: enterprise
 */
 
 var cal_1;
@@ -8397,6 +8587,7 @@ function requireCapnproto () {
 Language: Ceylon
 Author: Lucas Werkmeister <mail@lucaswerkmeister.de>
 Website: https://ceylon-lang.org
+Category: system
 */
 
 var ceylon_1;
@@ -8851,6 +9042,7 @@ Language: CMake
 Description: CMake is an open-source cross-platform system for build automation.
 Author: Igor Kalnitsky <igor@kalnitsky.org>
 Website: https://cmake.org
+Category: build-system
 */
 
 var cmake_1;
@@ -8906,6 +9098,7 @@ function requireCmake () {
 	        begin: /\$\{/,
 	        end: /\}/
 	      },
+	      hljs.COMMENT(/#\[\[/, /]]/),
 	      hljs.HASH_COMMENT_MODE,
 	      hljs.QUOTE_STRING_MODE,
 	      hljs.NUMBER_MODE
@@ -9075,6 +9268,7 @@ function requireCoffeescript () {
 	Category: scripting
 	Website: https://coffeescript.org
 	*/
+
 
 	/** @type LanguageFn */
 	function coffeescript(hljs) {
@@ -9954,9 +10148,44 @@ function requireCpp () {
 	  const NUMBERS = {
 	    className: 'number',
 	    variants: [
-	      { begin: '\\b(0b[01\']+)' },
-	      { begin: '(-?)\\b([\\d\']+(\\.[\\d\']*)?|\\.[\\d\']+)((ll|LL|l|L)(u|U)?|(u|U)(ll|LL|l|L)?|f|F|b|B)' },
-	      { begin: '(-?)(\\b0[xX][a-fA-F0-9\']+|(\\b[\\d\']+(\\.[\\d\']*)?|\\.[\\d\']+)([eE][-+]?[\\d\']+)?)' }
+	      // Floating-point literal.
+	      { begin:
+	        "[+-]?(?:" // Leading sign.
+	          // Decimal.
+	          + "(?:"
+	            +"[0-9](?:'?[0-9])*\\.(?:[0-9](?:'?[0-9])*)?"
+	            + "|\\.[0-9](?:'?[0-9])*"
+	          + ")(?:[Ee][+-]?[0-9](?:'?[0-9])*)?"
+	          + "|[0-9](?:'?[0-9])*[Ee][+-]?[0-9](?:'?[0-9])*"
+	          // Hexadecimal.
+	          + "|0[Xx](?:"
+	            +"[0-9A-Fa-f](?:'?[0-9A-Fa-f])*(?:\\.(?:[0-9A-Fa-f](?:'?[0-9A-Fa-f])*)?)?"
+	            + "|\\.[0-9A-Fa-f](?:'?[0-9A-Fa-f])*"
+	          + ")[Pp][+-]?[0-9](?:'?[0-9])*"
+	        + ")(?:" // Literal suffixes.
+	          + "[Ff](?:16|32|64|128)?"
+	          + "|(BF|bf)16"
+	          + "|[Ll]"
+	          + "|" // Literal suffix is optional.
+	        + ")"
+	      },
+	      // Integer literal.
+	      { begin:
+	        "[+-]?\\b(?:" // Leading sign.
+	          + "0[Bb][01](?:'?[01])*" // Binary.
+	          + "|0[Xx][0-9A-Fa-f](?:'?[0-9A-Fa-f])*" // Hexadecimal.
+	          + "|0(?:'?[0-7])*" // Octal or just a lone zero.
+	          + "|[1-9](?:'?[0-9])*" // Decimal.
+	        + ")(?:" // Literal suffixes.
+	          + "[Uu](?:LL?|ll?)"
+	          + "|[Uu][Zz]?"
+	          + "|(?:LL?|ll?)[Uu]?"
+	          + "|[Zz][Uu]"
+	          + "|" // Literal suffix is optional.
+	        + ")"
+	        // Note: there are user-defined literal suffixes too, but perhaps having the custom suffix not part of the
+	        // literal highlight actually makes it stand out more.
+	      }
 	    ],
 	    relevance: 0
 	  };
@@ -10584,6 +10813,7 @@ function requireCrmsh () {
 Language: Crystal
 Author: TSUYUSATO Kitsune <make.just.on@gmail.com>
 Website: https://crystal-lang.org
+Category: system
 */
 
 var crystal_1;
@@ -10904,7 +11134,7 @@ function requireCrystal () {
 Language: C#
 Author: Jason Diamond <jason@diamond.name>
 Contributor: Nicolas LLOBERA <nllobera@gmail.com>, Pieter Vantorre <pietervantorre@gmail.com>, David Pine <david.pine@microsoft.com>
-Website: https://docs.microsoft.com/en-us/dotnet/csharp/
+Website: https://docs.microsoft.com/dotnet/csharp/
 Category: common
 */
 
@@ -11001,6 +11231,7 @@ function requireCsharp () {
 	    'record',
 	    'ref',
 	    'return',
+	    'scoped',
 	    'sealed',
 	    'sizeof',
 	    'stackalloc',
@@ -11071,6 +11302,11 @@ function requireCsharp () {
 	    ],
 	    relevance: 0
 	  };
+	  const RAW_STRING = {
+	    className: 'string',
+	    begin: /"""("*)(?!")(.|\n)*?"""\1/,
+	    relevance: 1
+	  };
 	  const VERBATIM_STRING = {
 	    className: 'string',
 	    begin: '@"',
@@ -11136,6 +11372,7 @@ function requireCsharp () {
 	    hljs.inherit(hljs.C_BLOCK_COMMENT_MODE, { illegal: /\n/ })
 	  ];
 	  const STRING = { variants: [
+	    RAW_STRING,
 	    INTERPOLATED_VERBATIM_STRING,
 	    INTERPOLATED_STRING,
 	    VERBATIM_STRING,
@@ -11313,6 +11550,7 @@ Language: CSP
 Description: Content Security Policy definition highlighting
 Author: Taras <oxdef@oxdef.info>
 Website: https://developer.mozilla.org/en-US/docs/Web/HTTP/CSP
+Category: web
 
 vim: ts=2 sw=2 st=2
 */
@@ -11420,12 +11658,12 @@ function requireCss () {
 	    },
 	    CSS_VARIABLE: {
 	      className: "attr",
-	      begin: /--[A-Za-z][A-Za-z0-9_-]*/
+	      begin: /--[A-Za-z_][A-Za-z0-9_-]*/
 	    }
 	  };
 	};
 
-	const TAGS = [
+	const HTML_TAGS = [
 	  'a',
 	  'abbr',
 	  'address',
@@ -11477,11 +11715,16 @@ function requireCss () {
 	  'nav',
 	  'object',
 	  'ol',
+	  'optgroup',
+	  'option',
 	  'p',
+	  'picture',
 	  'q',
 	  'quote',
 	  'samp',
 	  'section',
+	  'select',
+	  'source',
 	  'span',
 	  'strong',
 	  'summary',
@@ -11499,6 +11742,58 @@ function requireCss () {
 	  'var',
 	  'video'
 	];
+
+	const SVG_TAGS = [
+	  'defs',
+	  'g',
+	  'marker',
+	  'mask',
+	  'pattern',
+	  'svg',
+	  'switch',
+	  'symbol',
+	  'feBlend',
+	  'feColorMatrix',
+	  'feComponentTransfer',
+	  'feComposite',
+	  'feConvolveMatrix',
+	  'feDiffuseLighting',
+	  'feDisplacementMap',
+	  'feFlood',
+	  'feGaussianBlur',
+	  'feImage',
+	  'feMerge',
+	  'feMorphology',
+	  'feOffset',
+	  'feSpecularLighting',
+	  'feTile',
+	  'feTurbulence',
+	  'linearGradient',
+	  'radialGradient',
+	  'stop',
+	  'circle',
+	  'ellipse',
+	  'image',
+	  'line',
+	  'path',
+	  'polygon',
+	  'polyline',
+	  'rect',
+	  'text',
+	  'use',
+	  'textPath',
+	  'tspan',
+	  'foreignObject',
+	  'clipPath'
+	];
+
+	const TAGS = [
+	  ...HTML_TAGS,
+	  ...SVG_TAGS,
+	];
+
+	// Sorting, then reversing makes sure longer attributes/elements like
+	// `font-weight` are matched fully instead of getting false positives on say `font`
 
 	const MEDIA_FEATURES = [
 	  'any-hover',
@@ -11535,7 +11830,7 @@ function requireCss () {
 	  'max-width',
 	  'min-height',
 	  'max-height'
-	];
+	].sort().reverse();
 
 	// https://developer.mozilla.org/en-US/docs/Web/CSS/Pseudo-classes
 	const PSEUDO_CLASSES = [
@@ -11598,7 +11893,7 @@ function requireCss () {
 	  'valid',
 	  'visited',
 	  'where' // where()
-	];
+	].sort().reverse();
 
 	// https://developer.mozilla.org/en-US/docs/Web/CSS/Pseudo-elements
 	const PSEUDO_ELEMENTS = [
@@ -11616,12 +11911,14 @@ function requireCss () {
 	  'selection',
 	  'slotted',
 	  'spelling-error'
-	];
+	].sort().reverse();
 
 	const ATTRIBUTES = [
+	  'accent-color',
 	  'align-content',
 	  'align-items',
 	  'align-self',
+	  'alignment-baseline',
 	  'all',
 	  'animation',
 	  'animation-delay',
@@ -11632,6 +11929,7 @@ function requireCss () {
 	  'animation-name',
 	  'animation-play-state',
 	  'animation-timing-function',
+	  'appearance',
 	  'backface-visibility',
 	  'background',
 	  'background-attachment',
@@ -11643,6 +11941,7 @@ function requireCss () {
 	  'background-position',
 	  'background-repeat',
 	  'background-size',
+	  'baseline-shift',
 	  'block-size',
 	  'border',
 	  'border-block',
@@ -11689,10 +11988,14 @@ function requireCss () {
 	  'border-left-width',
 	  'border-radius',
 	  'border-right',
+	  'border-end-end-radius',
+	  'border-end-start-radius',
 	  'border-right-color',
 	  'border-right-style',
 	  'border-right-width',
 	  'border-spacing',
+	  'border-start-end-radius',
+	  'border-start-start-radius',
 	  'border-style',
 	  'border-top',
 	  'border-top-color',
@@ -11708,6 +12011,8 @@ function requireCss () {
 	  'break-after',
 	  'break-before',
 	  'break-inside',
+	  'cx',
+	  'cy',
 	  'caption-side',
 	  'caret-color',
 	  'clear',
@@ -11715,6 +12020,11 @@ function requireCss () {
 	  'clip-path',
 	  'clip-rule',
 	  'color',
+	  'color-interpolation',
+	  'color-interpolation-filters',
+	  'color-profile',
+	  'color-rendering',
+	  'color-scheme',
 	  'column-count',
 	  'column-fill',
 	  'column-gap',
@@ -11736,7 +12046,12 @@ function requireCss () {
 	  'cursor',
 	  'direction',
 	  'display',
+	  'dominant-baseline',
 	  'empty-cells',
+	  'enable-background',
+	  'fill',
+	  'fill-opacity',
+	  'fill-rule',
 	  'filter',
 	  'flex',
 	  'flex-basis',
@@ -11747,6 +12062,8 @@ function requireCss () {
 	  'flex-wrap',
 	  'float',
 	  'flow',
+	  'flood-color',
+	  'flood-opacity',
 	  'font',
 	  'font-display',
 	  'font-family',
@@ -11768,6 +12085,7 @@ function requireCss () {
 	  'font-variation-settings',
 	  'font-weight',
 	  'gap',
+	  'glyph-orientation-horizontal',
 	  'glyph-orientation-vertical',
 	  'grid',
 	  'grid-area',
@@ -11794,16 +12112,32 @@ function requireCss () {
 	  'image-resolution',
 	  'ime-mode',
 	  'inline-size',
+	  'inset',
+	  'inset-block',
+	  'inset-block-end',
+	  'inset-block-start',
+	  'inset-inline',
+	  'inset-inline-end',
+	  'inset-inline-start',
 	  'isolation',
+	  'kerning',
 	  'justify-content',
+	  'justify-items',
+	  'justify-self',
 	  'left',
 	  'letter-spacing',
+	  'lighting-color',
 	  'line-break',
 	  'line-height',
 	  'list-style',
 	  'list-style-image',
 	  'list-style-position',
 	  'list-style-type',
+	  'marker',
+	  'marker-end',
+	  'marker-mid',
+	  'marker-start',
+	  'mask',
 	  'margin',
 	  'margin-block',
 	  'margin-block-end',
@@ -11885,12 +12219,15 @@ function requireCss () {
 	  'pointer-events',
 	  'position',
 	  'quotes',
+	  'r',
 	  'resize',
 	  'rest',
 	  'rest-after',
 	  'rest-before',
 	  'right',
+	  'rotate',
 	  'row-gap',
+	  'scale',
 	  'scroll-margin',
 	  'scroll-margin-block',
 	  'scroll-margin-block-end',
@@ -11922,11 +12259,23 @@ function requireCss () {
 	  'shape-image-threshold',
 	  'shape-margin',
 	  'shape-outside',
+	  'shape-rendering',
+	  'stop-color',
+	  'stop-opacity',
+	  'stroke',
+	  'stroke-dasharray',
+	  'stroke-dashoffset',
+	  'stroke-linecap',
+	  'stroke-linejoin',
+	  'stroke-miterlimit',
+	  'stroke-opacity',
+	  'stroke-width',
 	  'speak',
 	  'speak-as',
 	  'src', // @font-face
 	  'tab-size',
 	  'table-layout',
+	  'text-anchor',
 	  'text-align',
 	  'text-align-all',
 	  'text-align-last',
@@ -11934,7 +12283,9 @@ function requireCss () {
 	  'text-decoration',
 	  'text-decoration-color',
 	  'text-decoration-line',
+	  'text-decoration-skip-ink',
 	  'text-decoration-style',
+	  'text-decoration-thickness',
 	  'text-emphasis',
 	  'text-emphasis-color',
 	  'text-emphasis-position',
@@ -11946,6 +12297,7 @@ function requireCss () {
 	  'text-rendering',
 	  'text-shadow',
 	  'text-transform',
+	  'text-underline-offset',
 	  'text-underline-position',
 	  'top',
 	  'transform',
@@ -11957,7 +12309,9 @@ function requireCss () {
 	  'transition-duration',
 	  'transition-property',
 	  'transition-timing-function',
+	  'translate',
 	  'unicode-bidi',
+	  'vector-effect',
 	  'vertical-align',
 	  'visibility',
 	  'voice-balance',
@@ -11976,16 +12330,17 @@ function requireCss () {
 	  'word-spacing',
 	  'word-wrap',
 	  'writing-mode',
+	  'x',
+	  'y',
 	  'z-index'
-	  // reverse makes sure longer attributes `font-weight` are matched fully
-	  // instead of getting false positives on say `font`
-	].reverse();
+	].sort().reverse();
 
 	/*
 	Language: CSS
 	Category: common, css, web
 	Website: https://developer.mozilla.org/en-US/docs/Web/CSS
 	*/
+
 
 	/** @type LanguageFn */
 	function css(hljs) {
@@ -12063,6 +12418,7 @@ function requireCss () {
 	            relevance: 0, // from keywords
 	            keywords: { built_in: "url data-uri" },
 	            contains: [
+	              ...STRINGS,
 	              {
 	                className: "string",
 	                // any character other than `)` as in `url()` will be the start
@@ -12125,6 +12481,7 @@ Author: Aleksandar Ruzicic <aleksandar@ruzicic.info>
 Description: D is a language with C-like syntax and static typing. It pragmatically combines efficiency, control, and modeling power, with safety and programmer productivity.
 Version: 1.0a
 Website: https://dlang.org
+Category: system
 Date: 2012-04-08
 */
 
@@ -12545,11 +12902,11 @@ function requireMarkdown () {
 	    contains: [], // defined later
 	    variants: [
 	      {
-	        begin: /_{2}/,
+	        begin: /_{2}(?!\s)/,
 	        end: /_{2}/
 	      },
 	      {
-	        begin: /\*{2}/,
+	        begin: /\*{2}(?!\s)/,
 	        end: /\*{2}/
 	      }
 	    ]
@@ -12559,11 +12916,11 @@ function requireMarkdown () {
 	    contains: [], // defined later
 	    variants: [
 	      {
-	        begin: /\*(?!\*)/,
+	        begin: /\*(?![*\s])/,
 	        end: /\*/
 	      },
 	      {
-	        begin: /_(?!_)/,
+	        begin: /_(?![_\s])/,
 	        end: /_/,
 	        relevance: 0
 	      }
@@ -12623,6 +12980,12 @@ function requireMarkdown () {
 	    end: '$'
 	  };
 
+	  const ENTITY = {
+	    //https://spec.commonmark.org/0.31.2/#entity-references
+	    scope: 'literal',
+	    match: /&([a-zA-Z0-9]+|#[0-9]{1,7}|#[Xx][0-9a-fA-F]{1,6});/
+	  };
+
 	  return {
 	    name: 'Markdown',
 	    aliases: [
@@ -12640,7 +13003,8 @@ function requireMarkdown () {
 	      CODE,
 	      HORIZONTAL_RULE,
 	      LINK,
-	      LINK_REFERENCE
+	      LINK_REFERENCE,
+	      ENTITY
 	    ]
 	  };
 	}
@@ -12786,6 +13150,7 @@ function requireDart () {
 	    "assert",
 	    "async",
 	    "await",
+	    "base",
 	    "break",
 	    "case",
 	    "catch",
@@ -12815,7 +13180,7 @@ function requireDart () {
 	    "implements",
 	    "import",
 	    "in",
-	    "inferface",
+	    "interface",
 	    "is",
 	    "late",
 	    "library",
@@ -12828,6 +13193,7 @@ function requireDart () {
 	    "required",
 	    "rethrow",
 	    "return",
+	    "sealed",
 	    "set",
 	    "show",
 	    "static",
@@ -12841,6 +13207,7 @@ function requireDart () {
 	    "typedef",
 	    "var",
 	    "void",
+	    "when",
 	    "while",
 	    "with",
 	    "yield"
@@ -12920,6 +13287,7 @@ function requireDart () {
 /*
 Language: Delphi
 Website: https://www.embarcadero.com/products/delphi
+Category: system
 */
 
 var delphi_1;
@@ -13089,19 +13457,35 @@ function requireDelphi () {
 	    // Source: https://www.freepascal.org/docs-html/ref/refse6.html
 	    variants: [
 	      {
+	        // Regular numbers, e.g., 123, 123.456.
+	        match: /\b\d[\d_]*(\.\d[\d_]*)?/ },
+	      {
 	        // Hexadecimal notation, e.g., $7F.
-	        begin: '\\$[0-9A-Fa-f]+' },
+	        match: /\$[\dA-Fa-f_]+/ },
+	      {
+	        // Hexadecimal literal with no digits
+	        match: /\$/,
+	        relevance: 0 },
 	      {
 	        // Octal notation, e.g., &42.
-	        begin: '&[0-7]+' },
+	        match: /&[0-7][0-7_]*/ },
 	      {
 	        // Binary notation, e.g., %1010.
-	        begin: '%[01]+' }
+	        match: /%[01_]+/ },
+	      {
+	        // Binary literal with no digits
+	        match: /%/,
+	        relevance: 0 }
 	    ]
 	  };
 	  const CHAR_STRING = {
 	    className: 'string',
-	    begin: /(#\d+)+/
+	    variants: [
+	      { match: /#\d[\d_]*/ },
+	      { match: /#\$[\dA-Fa-f][\dA-Fa-f_]*/ },
+	      { match: /#&[0-7][0-7_]*/ },
+	      { match: /#%[01][01_]*/ }
+	    ]
 	  };
 	  const CLASS = {
 	    begin: hljs.IDENT_RE + '\\s*=\\s*class\\s*\\(',
@@ -13143,7 +13527,6 @@ function requireDelphi () {
 	    contains: [
 	      STRING,
 	      CHAR_STRING,
-	      hljs.NUMBER_MODE,
 	      NUMBER,
 	      CLASS,
 	      FUNCTION,
@@ -13456,6 +13839,7 @@ Language: Batch file (DOS)
 Author: Alexander Makarov <sam@rmcreative.ru>
 Contributors: Anton Kochkov <anton.kochkov@gmail.com>
 Website: https://en.wikipedia.org/wiki/Batch_file
+Category: scripting
 */
 
 var dos_1;
@@ -13927,6 +14311,7 @@ function requireDust () {
 Language: Extended Backus-Naur Form
 Author: Alex McKibben <alex@nullscope.net>
 Website: https://en.wikipedia.org/wiki/Extended_Backus–Naur_form
+Category: syntax
 */
 
 var ebnf_1;
@@ -14431,7 +14816,7 @@ Description: Ruby is a dynamic, open source programming language with a focus on
 Website: https://www.ruby-lang.org/
 Author: Anton Kovalyov <anton@kovalyov.net>
 Contributors: Peter Leonov <gojpeg@yandex.ru>, Vasily Polovnyov <vast@whiteants.net>, Loren Segal <lsegal@soen.ca>, Pascal Hurni <phi@ruby-reactive.org>, Cedric Sohrauer <sohrauer@googlemail.com>
-Category: common
+Category: common, scripting
 */
 
 var ruby_1;
@@ -14451,10 +14836,23 @@ function requireRuby () {
 	  )
 	  ;
 	  const CLASS_NAME_WITH_NAMESPACE_RE = regex.concat(CLASS_NAME_RE, /(::\w+)*/);
+	  // very popular ruby built-ins that one might even assume
+	  // are actual keywords (despite that not being the case)
+	  const PSEUDO_KWS = [
+	    "include",
+	    "extend",
+	    "prepend",
+	    "public",
+	    "private",
+	    "protected",
+	    "raise",
+	    "throw"
+	  ];
 	  const RUBY_KEYWORDS = {
 	    "variable.constant": [
 	      "__FILE__",
-	      "__LINE__"
+	      "__LINE__",
+	      "__ENCODING__"
 	    ],
 	    "variable.language": [
 	      "self",
@@ -14463,9 +14861,6 @@ function requireRuby () {
 	    keyword: [
 	      "alias",
 	      "and",
-	      "attr_accessor",
-	      "attr_reader",
-	      "attr_writer",
 	      "begin",
 	      "BEGIN",
 	      "break",
@@ -14481,7 +14876,6 @@ function requireRuby () {
 	      "for",
 	      "if",
 	      "in",
-	      "include",
 	      "module",
 	      "next",
 	      "not",
@@ -14498,10 +14892,17 @@ function requireRuby () {
 	      "when",
 	      "while",
 	      "yield",
+	      ...PSEUDO_KWS
 	    ],
 	    built_in: [
 	      "proc",
-	      "lambda"
+	      "lambda",
+	      "attr_accessor",
+	      "attr_reader",
+	      "attr_writer",
+	      "define_method",
+	      "private_constant",
+	      "module_function"
 	    ],
 	    literal: [
 	      "true",
@@ -14660,6 +15061,17 @@ function requireRuby () {
 	    ]
 	  };
 
+	  const INCLUDE_EXTEND = {
+	    match: [
+	      /(include|extend)\s+/,
+	      CLASS_NAME_WITH_NAMESPACE_RE
+	    ],
+	    scope: {
+	      2: "title.class"
+	    },
+	    keywords: RUBY_KEYWORDS
+	  };
+
 	  const CLASS_DEFINITION = {
 	    variants: [
 	      {
@@ -14672,7 +15084,7 @@ function requireRuby () {
 	      },
 	      {
 	        match: [
-	          /class\s+/,
+	          /\b(class|module)\s+/,
 	          CLASS_NAME_WITH_NAMESPACE_RE
 	        ]
 	      }
@@ -14708,18 +15120,27 @@ function requireRuby () {
 	    relevance: 0,
 	    match: [
 	      CLASS_NAME_WITH_NAMESPACE_RE,
-	      /\.new[ (]/
+	      /\.new[. (]/
 	    ],
 	    scope: {
 	      1: "title.class"
 	    }
 	  };
 
+	  // CamelCase
+	  const CLASS_REFERENCE = {
+	    relevance: 0,
+	    match: CLASS_NAME_RE,
+	    scope: "title.class"
+	  };
+
 	  const RUBY_DEFAULT_CONTAINS = [
 	    STRING,
 	    CLASS_DEFINITION,
+	    INCLUDE_EXTEND,
 	    OBJECT_CREATION,
 	    UPPER_CASE_CONSTANT,
+	    CLASS_REFERENCE,
 	    METHOD_DEFINITION,
 	    {
 	      // swallow namespace qualifiers before symbols
@@ -15031,6 +15452,10 @@ function requireErlang () {
 	      }
 	    ]
 	  };
+	  const CHAR_LITERAL = {
+	    scope: 'string',
+	    match: /\$(\\([^0-9]|[0-9]{1,3}|)|.)/,
+	  };
 
 	  const BLOCK_STATEMENTS = {
 	    beginKeywords: 'fun receive if try case',
@@ -15048,7 +15473,8 @@ function requireErlang () {
 	    TUPLE,
 	    VAR1,
 	    VAR2,
-	    RECORD_ACCESS
+	    RECORD_ACCESS,
+	    CHAR_LITERAL
 	  ];
 
 	  const BASIC_MODES = [
@@ -15061,7 +15487,8 @@ function requireErlang () {
 	    TUPLE,
 	    VAR1,
 	    VAR2,
-	    RECORD_ACCESS
+	    RECORD_ACCESS,
+	    CHAR_LITERAL
 	  ];
 	  FUNCTION_CALL.contains[1].contains = BASIC_MODES;
 	  TUPLE.contains = BASIC_MODES;
@@ -15097,6 +15524,7 @@ function requireErlang () {
 	    end: '\\)',
 	    contains: BASIC_MODES
 	  };
+
 	  return {
 	    name: 'Erlang',
 	    aliases: [ 'erl' ],
@@ -15138,6 +15566,7 @@ function requireErlang () {
 	      VAR1,
 	      VAR2,
 	      TUPLE,
+	      CHAR_LITERAL,
 	      { begin: /\.$/ } // relevance booster
 	    ]
 	  };
@@ -15152,6 +15581,7 @@ Language: Excel formulae
 Author: Victor Zhou <OiCMudkips@users.noreply.github.com>
 Description: Excel formulae
 Website: https://products.office.com/en-us/excel/
+Category: enterprise
 */
 
 var excel_1;
@@ -16394,6 +16824,7 @@ function requireFortran () {
 	      'f95'
 	    ],
 	    keywords: {
+	      $pattern: /\b[a-z][a-z0-9_]+\b|\.[a-z][a-z0-9_]+\./,
 	      keyword: KEYWORDS,
 	      literal: LITERALS,
 	      built_in: BUILT_INS
@@ -16501,6 +16932,7 @@ function requireFsharp () {
 	Website: https://docs.microsoft.com/en-us/dotnet/fsharp/
 	Category: functional
 	*/
+
 
 	/** @type LanguageFn */
 	function fsharp(hljs) {
@@ -17447,7 +17879,7 @@ function requireGauss () {
 	        excludeEnd: true,
 	        contains: [].concat(PARSE_PARAMS)
 	      },
-	      inherits || {}
+	      {}
 	    );
 	    mode.contains.push(FUNCTION_DEF);
 	    mode.contains.push(hljs.C_NUMBER_MODE);
@@ -17565,6 +17997,7 @@ function requireGauss () {
  Contributors: Adam Joseph Cook <adam.joseph.cook@gmail.com>
  Description: G-code syntax highlighter for Fanuc and other common CNC machine tool controls.
  Website: https://www.sis.se/api/document/preview/911952/
+ Category: hardware
  */
 
 var gcode_1;
@@ -17846,9 +18279,8 @@ function requireGlsl () {
 
 /*
 Language: GML
-Author: Meseta <meseta@gmail.com>
-Description: Game Maker Language for GameMaker Studio 2
-Website: https://docs2.yoyogames.com
+Description: Game Maker Language for GameMaker (rev. 2023.1)
+Website: https://manual.yoyogames.com/
 Category: scripting
 */
 
@@ -17860,622 +18292,304 @@ function requireGml () {
 	hasRequiredGml = 1;
 	function gml(hljs) {
 	  const KEYWORDS = [
-	    "begin",
-	    "end",
-	    "if",
-	    "then",
-	    "else",
-	    "while",
-	    "do",
-	    "for",
-	    "break",
-	    "continue",
-	    "with",
-	    "until",
-	    "repeat",
-	    "exit",
-	    "and",
-	    "or",
-	    "xor",
-	    "not",
-	    "return",
-	    "mod",
-	    "div",
-	    "switch",
-	    "case",
-	    "default",
-	    "var",
-	    "globalvar",
-	    "enum",
-	    "function",
-	    "constructor",
-	    "delete",
+	    "#endregion",
 	    "#macro",
 	    "#region",
-	    "#endregion"
+	    "and",
+	    "begin",
+	    "break",
+	    "case",
+	    "constructor",
+	    "continue",
+	    "default",
+	    "delete",
+	    "div",
+	    "do",
+	    "else",
+	    "end",
+	    "enum",
+	    "exit",
+	    "for",
+	    "function",
+	    "globalvar",
+	    "if",
+	    "mod",
+	    "new",
+	    "not",
+	    "or",
+	    "repeat",
+	    "return",
+	    "static",
+	    "switch",
+	    "then",
+	    "until",
+	    "var",
+	    "while",
+	    "with",
+	    "xor"
 	  ];
+
 	  const BUILT_INS = [
-	    "is_real",
-	    "is_string",
-	    "is_array",
-	    "is_undefined",
-	    "is_int32",
-	    "is_int64",
-	    "is_ptr",
-	    "is_vec3",
-	    "is_vec4",
-	    "is_matrix",
-	    "is_bool",
-	    "is_method",
-	    "is_struct",
-	    "is_infinity",
-	    "is_nan",
-	    "is_numeric",
-	    "typeof",
-	    "variable_global_exists",
-	    "variable_global_get",
-	    "variable_global_set",
-	    "variable_instance_exists",
-	    "variable_instance_get",
-	    "variable_instance_set",
-	    "variable_instance_get_names",
-	    "variable_struct_exists",
-	    "variable_struct_get",
-	    "variable_struct_get_names",
-	    "variable_struct_names_count",
-	    "variable_struct_remove",
-	    "variable_struct_set",
-	    "array_delete",
-	    "array_insert",
-	    "array_length",
-	    "array_length_1d",
-	    "array_length_2d",
-	    "array_height_2d",
-	    "array_equals",
-	    "array_create",
-	    "array_copy",
-	    "array_pop",
-	    "array_push",
-	    "array_resize",
-	    "array_sort",
-	    "random",
-	    "random_range",
-	    "irandom",
-	    "irandom_range",
-	    "random_set_seed",
-	    "random_get_seed",
-	    "randomize",
-	    "randomise",
-	    "choose",
 	    "abs",
-	    "round",
-	    "floor",
-	    "ceil",
-	    "sign",
-	    "frac",
-	    "sqrt",
-	    "sqr",
-	    "exp",
-	    "ln",
-	    "log2",
-	    "log10",
-	    "sin",
-	    "cos",
-	    "tan",
-	    "arcsin",
-	    "arccos",
-	    "arctan",
-	    "arctan2",
-	    "dsin",
-	    "dcos",
-	    "dtan",
-	    "darcsin",
-	    "darccos",
-	    "darctan",
-	    "darctan2",
-	    "degtorad",
-	    "radtodeg",
-	    "power",
-	    "logn",
-	    "min",
-	    "max",
-	    "mean",
-	    "median",
-	    "clamp",
-	    "lerp",
-	    "dot_product",
-	    "dot_product_3d",
-	    "dot_product_normalised",
-	    "dot_product_3d_normalised",
-	    "dot_product_normalized",
-	    "dot_product_3d_normalized",
-	    "math_set_epsilon",
-	    "math_get_epsilon",
-	    "angle_difference",
-	    "point_distance_3d",
-	    "point_distance",
-	    "point_direction",
-	    "lengthdir_x",
-	    "lengthdir_y",
-	    "real",
-	    "string",
-	    "int64",
-	    "ptr",
-	    "string_format",
-	    "chr",
-	    "ansi_char",
-	    "ord",
-	    "string_length",
-	    "string_byte_length",
-	    "string_pos",
-	    "string_copy",
-	    "string_char_at",
-	    "string_ord_at",
-	    "string_byte_at",
-	    "string_set_byte_at",
-	    "string_delete",
-	    "string_insert",
-	    "string_lower",
-	    "string_upper",
-	    "string_repeat",
-	    "string_letters",
-	    "string_digits",
-	    "string_lettersdigits",
-	    "string_replace",
-	    "string_replace_all",
-	    "string_count",
-	    "string_hash_to_newline",
-	    "clipboard_has_text",
-	    "clipboard_set_text",
-	    "clipboard_get_text",
-	    "date_current_datetime",
-	    "date_create_datetime",
-	    "date_valid_datetime",
-	    "date_inc_year",
-	    "date_inc_month",
-	    "date_inc_week",
-	    "date_inc_day",
-	    "date_inc_hour",
-	    "date_inc_minute",
-	    "date_inc_second",
-	    "date_get_year",
-	    "date_get_month",
-	    "date_get_week",
-	    "date_get_day",
-	    "date_get_hour",
-	    "date_get_minute",
-	    "date_get_second",
-	    "date_get_weekday",
-	    "date_get_day_of_year",
-	    "date_get_hour_of_year",
-	    "date_get_minute_of_year",
-	    "date_get_second_of_year",
-	    "date_year_span",
-	    "date_month_span",
-	    "date_week_span",
-	    "date_day_span",
-	    "date_hour_span",
-	    "date_minute_span",
-	    "date_second_span",
-	    "date_compare_datetime",
-	    "date_compare_date",
-	    "date_compare_time",
-	    "date_date_of",
-	    "date_time_of",
-	    "date_datetime_string",
-	    "date_date_string",
-	    "date_time_string",
-	    "date_days_in_month",
-	    "date_days_in_year",
-	    "date_leap_year",
-	    "date_is_today",
-	    "date_set_timezone",
-	    "date_get_timezone",
-	    "game_set_speed",
-	    "game_get_speed",
-	    "motion_set",
-	    "motion_add",
-	    "place_free",
-	    "place_empty",
-	    "place_meeting",
-	    "place_snapped",
-	    "move_random",
-	    "move_snap",
-	    "move_towards_point",
-	    "move_contact_solid",
-	    "move_contact_all",
-	    "move_outside_solid",
-	    "move_outside_all",
-	    "move_bounce_solid",
-	    "move_bounce_all",
-	    "move_wrap",
-	    "distance_to_point",
-	    "distance_to_object",
-	    "position_empty",
-	    "position_meeting",
-	    "path_start",
-	    "path_end",
-	    "mp_linear_step",
-	    "mp_potential_step",
-	    "mp_linear_step_object",
-	    "mp_potential_step_object",
-	    "mp_potential_settings",
-	    "mp_linear_path",
-	    "mp_potential_path",
-	    "mp_linear_path_object",
-	    "mp_potential_path_object",
-	    "mp_grid_create",
-	    "mp_grid_destroy",
-	    "mp_grid_clear_all",
-	    "mp_grid_clear_cell",
-	    "mp_grid_clear_rectangle",
-	    "mp_grid_add_cell",
-	    "mp_grid_get_cell",
-	    "mp_grid_add_rectangle",
-	    "mp_grid_add_instances",
-	    "mp_grid_path",
-	    "mp_grid_draw",
-	    "mp_grid_to_ds_grid",
-	    "collision_point",
-	    "collision_rectangle",
-	    "collision_circle",
-	    "collision_ellipse",
-	    "collision_line",
-	    "collision_point_list",
-	    "collision_rectangle_list",
-	    "collision_circle_list",
-	    "collision_ellipse_list",
-	    "collision_line_list",
-	    "instance_position_list",
-	    "instance_place_list",
-	    "point_in_rectangle",
-	    "point_in_triangle",
-	    "point_in_circle",
-	    "rectangle_in_rectangle",
-	    "rectangle_in_triangle",
-	    "rectangle_in_circle",
-	    "instance_find",
-	    "instance_exists",
-	    "instance_number",
-	    "instance_position",
-	    "instance_nearest",
-	    "instance_furthest",
-	    "instance_place",
-	    "instance_create_depth",
-	    "instance_create_layer",
-	    "instance_copy",
-	    "instance_change",
-	    "instance_destroy",
-	    "position_destroy",
-	    "position_change",
-	    "instance_id_get",
-	    "instance_deactivate_all",
-	    "instance_deactivate_object",
-	    "instance_deactivate_region",
-	    "instance_activate_all",
-	    "instance_activate_object",
-	    "instance_activate_region",
-	    "room_goto",
-	    "room_goto_previous",
-	    "room_goto_next",
-	    "room_previous",
-	    "room_next",
-	    "room_restart",
-	    "game_end",
-	    "game_restart",
-	    "game_load",
-	    "game_save",
-	    "game_save_buffer",
-	    "game_load_buffer",
-	    "event_perform",
-	    "event_user",
-	    "event_perform_object",
-	    "event_inherited",
-	    "show_debug_message",
-	    "show_debug_overlay",
-	    "debug_event",
-	    "debug_get_callstack",
 	    "alarm_get",
 	    "alarm_set",
-	    "font_texture_page_size",
-	    "keyboard_set_map",
-	    "keyboard_get_map",
-	    "keyboard_unset_map",
-	    "keyboard_check",
-	    "keyboard_check_pressed",
-	    "keyboard_check_released",
-	    "keyboard_check_direct",
-	    "keyboard_get_numlock",
-	    "keyboard_set_numlock",
-	    "keyboard_key_press",
-	    "keyboard_key_release",
-	    "keyboard_clear",
-	    "io_clear",
-	    "mouse_check_button",
-	    "mouse_check_button_pressed",
-	    "mouse_check_button_released",
-	    "mouse_wheel_up",
-	    "mouse_wheel_down",
-	    "mouse_clear",
-	    "draw_self",
-	    "draw_sprite",
-	    "draw_sprite_pos",
-	    "draw_sprite_ext",
-	    "draw_sprite_stretched",
-	    "draw_sprite_stretched_ext",
-	    "draw_sprite_tiled",
-	    "draw_sprite_tiled_ext",
-	    "draw_sprite_part",
-	    "draw_sprite_part_ext",
-	    "draw_sprite_general",
-	    "draw_clear",
-	    "draw_clear_alpha",
-	    "draw_point",
-	    "draw_line",
-	    "draw_line_width",
-	    "draw_rectangle",
-	    "draw_roundrect",
-	    "draw_roundrect_ext",
-	    "draw_triangle",
-	    "draw_circle",
-	    "draw_ellipse",
-	    "draw_set_circle_precision",
-	    "draw_arrow",
-	    "draw_button",
-	    "draw_path",
-	    "draw_healthbar",
-	    "draw_getpixel",
-	    "draw_getpixel_ext",
-	    "draw_set_colour",
-	    "draw_set_color",
-	    "draw_set_alpha",
-	    "draw_get_colour",
-	    "draw_get_color",
-	    "draw_get_alpha",
-	    "merge_colour",
-	    "make_colour_rgb",
-	    "make_colour_hsv",
-	    "colour_get_red",
-	    "colour_get_green",
-	    "colour_get_blue",
-	    "colour_get_hue",
-	    "colour_get_saturation",
-	    "colour_get_value",
-	    "merge_color",
-	    "make_color_rgb",
-	    "make_color_hsv",
-	    "color_get_red",
-	    "color_get_green",
-	    "color_get_blue",
-	    "color_get_hue",
-	    "color_get_saturation",
-	    "color_get_value",
-	    "merge_color",
-	    "screen_save",
-	    "screen_save_part",
-	    "draw_set_font",
-	    "draw_set_halign",
-	    "draw_set_valign",
-	    "draw_text",
-	    "draw_text_ext",
-	    "string_width",
-	    "string_height",
-	    "string_width_ext",
-	    "string_height_ext",
-	    "draw_text_transformed",
-	    "draw_text_ext_transformed",
-	    "draw_text_colour",
-	    "draw_text_ext_colour",
-	    "draw_text_transformed_colour",
-	    "draw_text_ext_transformed_colour",
-	    "draw_text_color",
-	    "draw_text_ext_color",
-	    "draw_text_transformed_color",
-	    "draw_text_ext_transformed_color",
-	    "draw_point_colour",
-	    "draw_line_colour",
-	    "draw_line_width_colour",
-	    "draw_rectangle_colour",
-	    "draw_roundrect_colour",
-	    "draw_roundrect_colour_ext",
-	    "draw_triangle_colour",
-	    "draw_circle_colour",
-	    "draw_ellipse_colour",
-	    "draw_point_color",
-	    "draw_line_color",
-	    "draw_line_width_color",
-	    "draw_rectangle_color",
-	    "draw_roundrect_color",
-	    "draw_roundrect_color_ext",
-	    "draw_triangle_color",
-	    "draw_circle_color",
-	    "draw_ellipse_color",
-	    "draw_primitive_begin",
-	    "draw_vertex",
-	    "draw_vertex_colour",
-	    "draw_vertex_color",
-	    "draw_primitive_end",
-	    "sprite_get_uvs",
-	    "font_get_uvs",
-	    "sprite_get_texture",
-	    "font_get_texture",
-	    "texture_get_width",
-	    "texture_get_height",
-	    "texture_get_uvs",
-	    "draw_primitive_begin_texture",
-	    "draw_vertex_texture",
-	    "draw_vertex_texture_colour",
-	    "draw_vertex_texture_color",
-	    "texture_global_scale",
-	    "surface_create",
-	    "surface_create_ext",
-	    "surface_resize",
-	    "surface_free",
-	    "surface_exists",
-	    "surface_get_width",
-	    "surface_get_height",
-	    "surface_get_texture",
-	    "surface_set_target",
-	    "surface_set_target_ext",
-	    "surface_reset_target",
-	    "surface_depth_disable",
-	    "surface_get_depth_disable",
-	    "draw_surface",
-	    "draw_surface_stretched",
-	    "draw_surface_tiled",
-	    "draw_surface_part",
-	    "draw_surface_ext",
-	    "draw_surface_stretched_ext",
-	    "draw_surface_tiled_ext",
-	    "draw_surface_part_ext",
-	    "draw_surface_general",
-	    "surface_getpixel",
-	    "surface_getpixel_ext",
-	    "surface_save",
-	    "surface_save_part",
-	    "surface_copy",
-	    "surface_copy_part",
-	    "application_surface_draw_enable",
+	    "angle_difference",
+	    "animcurve_channel_evaluate",
+	    "animcurve_channel_new",
+	    "animcurve_create",
+	    "animcurve_destroy",
+	    "animcurve_exists",
+	    "animcurve_get",
+	    "animcurve_get_channel",
+	    "animcurve_get_channel_index",
+	    "animcurve_point_new",
+	    "ansi_char",
 	    "application_get_position",
+	    "application_surface_draw_enable",
 	    "application_surface_enable",
 	    "application_surface_is_enabled",
-	    "display_get_width",
-	    "display_get_height",
-	    "display_get_orientation",
-	    "display_get_gui_width",
-	    "display_get_gui_height",
-	    "display_reset",
-	    "display_mouse_get_x",
-	    "display_mouse_get_y",
-	    "display_mouse_set",
-	    "display_set_ui_visibility",
-	    "window_set_fullscreen",
-	    "window_get_fullscreen",
-	    "window_set_caption",
-	    "window_set_min_width",
-	    "window_set_max_width",
-	    "window_set_min_height",
-	    "window_set_max_height",
-	    "window_get_visible_rects",
-	    "window_get_caption",
-	    "window_set_cursor",
-	    "window_get_cursor",
-	    "window_set_colour",
-	    "window_get_colour",
-	    "window_set_color",
-	    "window_get_color",
-	    "window_set_position",
-	    "window_set_size",
-	    "window_set_rectangle",
-	    "window_center",
-	    "window_get_x",
-	    "window_get_y",
-	    "window_get_width",
-	    "window_get_height",
-	    "window_mouse_get_x",
-	    "window_mouse_get_y",
-	    "window_mouse_set",
-	    "window_view_mouse_get_x",
-	    "window_view_mouse_get_y",
-	    "window_views_mouse_get_x",
-	    "window_views_mouse_get_y",
-	    "audio_listener_position",
-	    "audio_listener_velocity",
-	    "audio_listener_orientation",
-	    "audio_emitter_position",
-	    "audio_emitter_create",
-	    "audio_emitter_free",
-	    "audio_emitter_exists",
-	    "audio_emitter_pitch",
-	    "audio_emitter_velocity",
-	    "audio_emitter_falloff",
-	    "audio_emitter_gain",
-	    "audio_play_sound",
-	    "audio_play_sound_on",
-	    "audio_play_sound_at",
-	    "audio_stop_sound",
-	    "audio_resume_music",
-	    "audio_music_is_playing",
-	    "audio_resume_sound",
-	    "audio_pause_sound",
-	    "audio_pause_music",
+	    "arccos",
+	    "arcsin",
+	    "arctan",
+	    "arctan2",
+	    "array_all",
+	    "array_any",
+	    "array_concat",
+	    "array_contains",
+	    "array_contains_ext",
+	    "array_copy",
+	    "array_copy_while",
+	    "array_create",
+	    "array_create_ext",
+	    "array_delete",
+	    "array_equals",
+	    "array_filter",
+	    "array_filter_ext",
+	    "array_find_index",
+	    "array_first",
+	    "array_foreach",
+	    "array_get",
+	    "array_get_index",
+	    "array_insert",
+	    "array_intersection",
+	    "array_last",
+	    "array_length",
+	    "array_map",
+	    "array_map_ext",
+	    "array_pop",
+	    "array_push",
+	    "array_reduce",
+	    "array_resize",
+	    "array_reverse",
+	    "array_reverse_ext",
+	    "array_set",
+	    "array_shuffle",
+	    "array_shuffle_ext",
+	    "array_sort",
+	    "array_union",
+	    "array_unique",
+	    "array_unique_ext",
+	    "asset_add_tags",
+	    "asset_clear_tags",
+	    "asset_get_ids",
+	    "asset_get_index",
+	    "asset_get_tags",
+	    "asset_get_type",
+	    "asset_has_any_tag",
+	    "asset_has_tags",
+	    "asset_remove_tags",
+	    "audio_bus_clear_emitters",
+	    "audio_bus_create",
+	    "audio_bus_get_emitters",
 	    "audio_channel_num",
-	    "audio_sound_length",
-	    "audio_get_type",
-	    "audio_falloff_set_model",
-	    "audio_play_music",
-	    "audio_stop_music",
-	    "audio_master_gain",
-	    "audio_music_gain",
-	    "audio_sound_gain",
-	    "audio_sound_pitch",
-	    "audio_stop_all",
-	    "audio_resume_all",
-	    "audio_pause_all",
-	    "audio_is_playing",
-	    "audio_is_paused",
-	    "audio_exists",
-	    "audio_sound_set_track_position",
-	    "audio_sound_get_track_position",
+	    "audio_create_buffer_sound",
+	    "audio_create_play_queue",
+	    "audio_create_stream",
+	    "audio_create_sync_group",
+	    "audio_debug",
+	    "audio_destroy_stream",
+	    "audio_destroy_sync_group",
+	    "audio_effect_create",
+	    "audio_emitter_bus",
+	    "audio_emitter_create",
+	    "audio_emitter_exists",
+	    "audio_emitter_falloff",
+	    "audio_emitter_free",
+	    "audio_emitter_gain",
+	    "audio_emitter_get_bus",
 	    "audio_emitter_get_gain",
+	    "audio_emitter_get_listener_mask",
 	    "audio_emitter_get_pitch",
-	    "audio_emitter_get_x",
-	    "audio_emitter_get_y",
-	    "audio_emitter_get_z",
 	    "audio_emitter_get_vx",
 	    "audio_emitter_get_vy",
 	    "audio_emitter_get_vz",
-	    "audio_listener_set_position",
-	    "audio_listener_set_velocity",
-	    "audio_listener_set_orientation",
-	    "audio_listener_get_data",
-	    "audio_set_master_gain",
-	    "audio_get_master_gain",
-	    "audio_sound_get_gain",
-	    "audio_sound_get_pitch",
-	    "audio_get_name",
-	    "audio_sound_set_track_position",
-	    "audio_sound_get_track_position",
-	    "audio_create_stream",
-	    "audio_destroy_stream",
-	    "audio_create_sync_group",
-	    "audio_destroy_sync_group",
-	    "audio_play_in_sync_group",
-	    "audio_start_sync_group",
-	    "audio_stop_sync_group",
-	    "audio_pause_sync_group",
-	    "audio_resume_sync_group",
-	    "audio_sync_group_get_track_pos",
-	    "audio_sync_group_debug",
-	    "audio_sync_group_is_playing",
-	    "audio_debug",
-	    "audio_group_load",
-	    "audio_group_unload",
-	    "audio_group_is_loaded",
-	    "audio_group_load_progress",
-	    "audio_group_name",
-	    "audio_group_stop_all",
-	    "audio_group_set_gain",
-	    "audio_create_buffer_sound",
-	    "audio_free_buffer_sound",
-	    "audio_create_play_queue",
-	    "audio_free_play_queue",
-	    "audio_queue_sound",
-	    "audio_get_recorder_count",
-	    "audio_get_recorder_info",
-	    "audio_start_recording",
-	    "audio_stop_recording",
-	    "audio_sound_get_listener_mask",
-	    "audio_emitter_get_listener_mask",
-	    "audio_get_listener_mask",
-	    "audio_sound_set_listener_mask",
+	    "audio_emitter_get_x",
+	    "audio_emitter_get_y",
+	    "audio_emitter_get_z",
+	    "audio_emitter_pitch",
+	    "audio_emitter_position",
 	    "audio_emitter_set_listener_mask",
-	    "audio_set_listener_mask",
+	    "audio_emitter_velocity",
+	    "audio_exists",
+	    "audio_falloff_set_model",
+	    "audio_free_buffer_sound",
+	    "audio_free_play_queue",
 	    "audio_get_listener_count",
 	    "audio_get_listener_info",
-	    "audio_system",
-	    "show_message",
-	    "show_message_async",
+	    "audio_get_listener_mask",
+	    "audio_get_master_gain",
+	    "audio_get_name",
+	    "audio_get_recorder_count",
+	    "audio_get_recorder_info",
+	    "audio_get_type",
+	    "audio_group_get_assets",
+	    "audio_group_get_gain",
+	    "audio_group_is_loaded",
+	    "audio_group_load",
+	    "audio_group_load_progress",
+	    "audio_group_name",
+	    "audio_group_set_gain",
+	    "audio_group_stop_all",
+	    "audio_group_unload",
+	    "audio_is_paused",
+	    "audio_is_playing",
+	    "audio_listener_get_data",
+	    "audio_listener_orientation",
+	    "audio_listener_position",
+	    "audio_listener_set_orientation",
+	    "audio_listener_set_position",
+	    "audio_listener_set_velocity",
+	    "audio_listener_velocity",
+	    "audio_master_gain",
+	    "audio_pause_all",
+	    "audio_pause_sound",
+	    "audio_pause_sync_group",
+	    "audio_play_in_sync_group",
+	    "audio_play_sound",
+	    "audio_play_sound_at",
+	    "audio_play_sound_ext",
+	    "audio_play_sound_on",
+	    "audio_queue_sound",
+	    "audio_resume_all",
+	    "audio_resume_sound",
+	    "audio_resume_sync_group",
+	    "audio_set_listener_mask",
+	    "audio_set_master_gain",
+	    "audio_sound_gain",
+	    "audio_sound_get_audio_group",
+	    "audio_sound_get_gain",
+	    "audio_sound_get_listener_mask",
+	    "audio_sound_get_loop",
+	    "audio_sound_get_loop_end",
+	    "audio_sound_get_loop_start",
+	    "audio_sound_get_pitch",
+	    "audio_sound_get_track_position",
+	    "audio_sound_is_playable",
+	    "audio_sound_length",
+	    "audio_sound_loop",
+	    "audio_sound_loop_end",
+	    "audio_sound_loop_start",
+	    "audio_sound_pitch",
+	    "audio_sound_set_listener_mask",
+	    "audio_sound_set_track_position",
+	    "audio_start_recording",
+	    "audio_start_sync_group",
+	    "audio_stop_all",
+	    "audio_stop_recording",
+	    "audio_stop_sound",
+	    "audio_stop_sync_group",
+	    "audio_sync_group_debug",
+	    "audio_sync_group_get_track_pos",
+	    "audio_sync_group_is_paused",
+	    "audio_sync_group_is_playing",
+	    "audio_system_is_available",
+	    "audio_system_is_initialised",
+	    "base64_decode",
+	    "base64_encode",
+	    "bool",
+	    "browser_input_capture",
+	    "buffer_async_group_begin",
+	    "buffer_async_group_end",
+	    "buffer_async_group_option",
+	    "buffer_base64_decode",
+	    "buffer_base64_decode_ext",
+	    "buffer_base64_encode",
+	    "buffer_compress",
+	    "buffer_copy",
+	    "buffer_copy_from_vertex_buffer",
+	    "buffer_copy_stride",
+	    "buffer_crc32",
+	    "buffer_create",
+	    "buffer_create_from_vertex_buffer",
+	    "buffer_create_from_vertex_buffer_ext",
+	    "buffer_decompress",
+	    "buffer_delete",
+	    "buffer_exists",
+	    "buffer_fill",
+	    "buffer_get_address",
+	    "buffer_get_alignment",
+	    "buffer_get_size",
+	    "buffer_get_surface",
+	    "buffer_get_type",
+	    "buffer_load",
+	    "buffer_load_async",
+	    "buffer_load_ext",
+	    "buffer_load_partial",
+	    "buffer_md5",
+	    "buffer_peek",
+	    "buffer_poke",
+	    "buffer_read",
+	    "buffer_resize",
+	    "buffer_save",
+	    "buffer_save_async",
+	    "buffer_save_ext",
+	    "buffer_seek",
+	    "buffer_set_surface",
+	    "buffer_set_used_size",
+	    "buffer_sha1",
+	    "buffer_sizeof",
+	    "buffer_tell",
+	    "buffer_write",
+	    "call_cancel",
+	    "call_later",
+	    "camera_apply",
+	    "camera_copy_transforms",
+	    "camera_create",
+	    "camera_create_view",
+	    "camera_destroy",
+	    "camera_get_active",
+	    "camera_get_begin_script",
+	    "camera_get_default",
+	    "camera_get_end_script",
+	    "camera_get_proj_mat",
+	    "camera_get_update_script",
+	    "camera_get_view_angle",
+	    "camera_get_view_border_x",
+	    "camera_get_view_border_y",
+	    "camera_get_view_height",
+	    "camera_get_view_mat",
+	    "camera_get_view_speed_x",
+	    "camera_get_view_speed_y",
+	    "camera_get_view_target",
+	    "camera_get_view_width",
+	    "camera_get_view_x",
+	    "camera_get_view_y",
+	    "camera_set_begin_script",
+	    "camera_set_default",
+	    "camera_set_end_script",
+	    "camera_set_proj_mat",
+	    "camera_set_update_script",
+	    "camera_set_view_angle",
+	    "camera_set_view_border",
+	    "camera_set_view_mat",
+	    "camera_set_view_pos",
+	    "camera_set_view_size",
+	    "camera_set_view_speed",
+	    "camera_set_view_target",
+	    "ceil",
+	    "choose",
+	    "chr",
+	    "clamp",
 	    "clickable_add",
 	    "clickable_add_ext",
 	    "clickable_change",
@@ -18483,571 +18597,107 @@ function requireGml () {
 	    "clickable_delete",
 	    "clickable_exists",
 	    "clickable_set_style",
-	    "show_question",
-	    "show_question_async",
-	    "get_integer",
-	    "get_string",
-	    "get_integer_async",
-	    "get_string_async",
-	    "get_login_async",
-	    "get_open_filename",
-	    "get_save_filename",
-	    "get_open_filename_ext",
-	    "get_save_filename_ext",
-	    "show_error",
-	    "highscore_clear",
-	    "highscore_add",
-	    "highscore_value",
-	    "highscore_name",
-	    "draw_highscore",
-	    "sprite_exists",
-	    "sprite_get_name",
-	    "sprite_get_number",
-	    "sprite_get_width",
-	    "sprite_get_height",
-	    "sprite_get_xoffset",
-	    "sprite_get_yoffset",
-	    "sprite_get_bbox_left",
-	    "sprite_get_bbox_right",
-	    "sprite_get_bbox_top",
-	    "sprite_get_bbox_bottom",
-	    "sprite_save",
-	    "sprite_save_strip",
-	    "sprite_set_cache_size",
-	    "sprite_set_cache_size_ext",
-	    "sprite_get_tpe",
-	    "sprite_prefetch",
-	    "sprite_prefetch_multi",
-	    "sprite_flush",
-	    "sprite_flush_multi",
-	    "sprite_set_speed",
-	    "sprite_get_speed_type",
-	    "sprite_get_speed",
-	    "font_exists",
-	    "font_get_name",
-	    "font_get_fontname",
-	    "font_get_bold",
-	    "font_get_italic",
-	    "font_get_first",
-	    "font_get_last",
-	    "font_get_size",
-	    "font_set_cache_size",
-	    "path_exists",
-	    "path_get_name",
-	    "path_get_length",
-	    "path_get_time",
-	    "path_get_kind",
-	    "path_get_closed",
-	    "path_get_precision",
-	    "path_get_number",
-	    "path_get_point_x",
-	    "path_get_point_y",
-	    "path_get_point_speed",
-	    "path_get_x",
-	    "path_get_y",
-	    "path_get_speed",
-	    "script_exists",
-	    "script_get_name",
-	    "timeline_add",
-	    "timeline_delete",
-	    "timeline_clear",
-	    "timeline_exists",
-	    "timeline_get_name",
-	    "timeline_moment_clear",
-	    "timeline_moment_add_script",
-	    "timeline_size",
-	    "timeline_max_moment",
-	    "object_exists",
-	    "object_get_name",
-	    "object_get_sprite",
-	    "object_get_solid",
-	    "object_get_visible",
-	    "object_get_persistent",
-	    "object_get_mask",
-	    "object_get_parent",
-	    "object_get_physics",
-	    "object_is_ancestor",
-	    "room_exists",
-	    "room_get_name",
-	    "sprite_set_offset",
-	    "sprite_duplicate",
-	    "sprite_assign",
-	    "sprite_merge",
-	    "sprite_add",
-	    "sprite_replace",
-	    "sprite_create_from_surface",
-	    "sprite_add_from_surface",
-	    "sprite_delete",
-	    "sprite_set_alpha_from_sprite",
-	    "sprite_collision_mask",
-	    "font_add_enable_aa",
-	    "font_add_get_enable_aa",
-	    "font_add",
-	    "font_add_sprite",
-	    "font_add_sprite_ext",
-	    "font_replace",
-	    "font_replace_sprite",
-	    "font_replace_sprite_ext",
-	    "font_delete",
-	    "path_set_kind",
-	    "path_set_closed",
-	    "path_set_precision",
-	    "path_add",
-	    "path_assign",
-	    "path_duplicate",
-	    "path_append",
-	    "path_delete",
-	    "path_add_point",
-	    "path_insert_point",
-	    "path_change_point",
-	    "path_delete_point",
-	    "path_clear_points",
-	    "path_reverse",
-	    "path_mirror",
-	    "path_flip",
-	    "path_rotate",
-	    "path_rescale",
-	    "path_shift",
-	    "script_execute",
-	    "object_set_sprite",
-	    "object_set_solid",
-	    "object_set_visible",
-	    "object_set_persistent",
-	    "object_set_mask",
-	    "room_set_width",
-	    "room_set_height",
-	    "room_set_persistent",
-	    "room_set_background_colour",
-	    "room_set_background_color",
-	    "room_set_view",
-	    "room_set_viewport",
-	    "room_get_viewport",
-	    "room_set_view_enabled",
-	    "room_add",
-	    "room_duplicate",
-	    "room_assign",
-	    "room_instance_add",
-	    "room_instance_clear",
-	    "room_get_camera",
-	    "room_set_camera",
-	    "asset_get_index",
-	    "asset_get_type",
-	    "file_text_open_from_string",
-	    "file_text_open_read",
-	    "file_text_open_write",
-	    "file_text_open_append",
-	    "file_text_close",
-	    "file_text_write_string",
-	    "file_text_write_real",
-	    "file_text_writeln",
-	    "file_text_read_string",
-	    "file_text_read_real",
-	    "file_text_readln",
-	    "file_text_eof",
-	    "file_text_eoln",
-	    "file_exists",
-	    "file_delete",
-	    "file_rename",
-	    "file_copy",
-	    "directory_exists",
-	    "directory_create",
-	    "directory_destroy",
-	    "file_find_first",
-	    "file_find_next",
-	    "file_find_close",
-	    "file_attributes",
-	    "filename_name",
-	    "filename_path",
-	    "filename_dir",
-	    "filename_drive",
-	    "filename_ext",
-	    "filename_change_ext",
-	    "file_bin_open",
-	    "file_bin_rewrite",
-	    "file_bin_close",
-	    "file_bin_position",
-	    "file_bin_size",
-	    "file_bin_seek",
-	    "file_bin_write_byte",
-	    "file_bin_read_byte",
-	    "parameter_count",
-	    "parameter_string",
-	    "environment_get_variable",
-	    "ini_open_from_string",
-	    "ini_open",
-	    "ini_close",
-	    "ini_read_string",
-	    "ini_read_real",
-	    "ini_write_string",
-	    "ini_write_real",
-	    "ini_key_exists",
-	    "ini_section_exists",
-	    "ini_key_delete",
-	    "ini_section_delete",
-	    "ds_set_precision",
-	    "ds_exists",
-	    "ds_stack_create",
-	    "ds_stack_destroy",
-	    "ds_stack_clear",
-	    "ds_stack_copy",
-	    "ds_stack_size",
-	    "ds_stack_empty",
-	    "ds_stack_push",
-	    "ds_stack_pop",
-	    "ds_stack_top",
-	    "ds_stack_write",
-	    "ds_stack_read",
-	    "ds_queue_create",
-	    "ds_queue_destroy",
-	    "ds_queue_clear",
-	    "ds_queue_copy",
-	    "ds_queue_size",
-	    "ds_queue_empty",
-	    "ds_queue_enqueue",
-	    "ds_queue_dequeue",
-	    "ds_queue_head",
-	    "ds_queue_tail",
-	    "ds_queue_write",
-	    "ds_queue_read",
-	    "ds_list_create",
-	    "ds_list_destroy",
-	    "ds_list_clear",
-	    "ds_list_copy",
-	    "ds_list_size",
-	    "ds_list_empty",
-	    "ds_list_add",
-	    "ds_list_insert",
-	    "ds_list_replace",
-	    "ds_list_delete",
-	    "ds_list_find_index",
-	    "ds_list_find_value",
-	    "ds_list_mark_as_list",
-	    "ds_list_mark_as_map",
-	    "ds_list_sort",
-	    "ds_list_shuffle",
-	    "ds_list_write",
-	    "ds_list_read",
-	    "ds_list_set",
-	    "ds_map_create",
-	    "ds_map_destroy",
-	    "ds_map_clear",
-	    "ds_map_copy",
-	    "ds_map_size",
-	    "ds_map_empty",
-	    "ds_map_add",
-	    "ds_map_add_list",
-	    "ds_map_add_map",
-	    "ds_map_replace",
-	    "ds_map_replace_map",
-	    "ds_map_replace_list",
-	    "ds_map_delete",
-	    "ds_map_exists",
-	    "ds_map_find_value",
-	    "ds_map_find_previous",
-	    "ds_map_find_next",
-	    "ds_map_find_first",
-	    "ds_map_find_last",
-	    "ds_map_write",
-	    "ds_map_read",
-	    "ds_map_secure_save",
-	    "ds_map_secure_load",
-	    "ds_map_secure_load_buffer",
-	    "ds_map_secure_save_buffer",
-	    "ds_map_set",
-	    "ds_priority_create",
-	    "ds_priority_destroy",
-	    "ds_priority_clear",
-	    "ds_priority_copy",
-	    "ds_priority_size",
-	    "ds_priority_empty",
-	    "ds_priority_add",
-	    "ds_priority_change_priority",
-	    "ds_priority_find_priority",
-	    "ds_priority_delete_value",
-	    "ds_priority_delete_min",
-	    "ds_priority_find_min",
-	    "ds_priority_delete_max",
-	    "ds_priority_find_max",
-	    "ds_priority_write",
-	    "ds_priority_read",
-	    "ds_grid_create",
-	    "ds_grid_destroy",
-	    "ds_grid_copy",
-	    "ds_grid_resize",
-	    "ds_grid_width",
-	    "ds_grid_height",
-	    "ds_grid_clear",
-	    "ds_grid_set",
-	    "ds_grid_add",
-	    "ds_grid_multiply",
-	    "ds_grid_set_region",
-	    "ds_grid_add_region",
-	    "ds_grid_multiply_region",
-	    "ds_grid_set_disk",
-	    "ds_grid_add_disk",
-	    "ds_grid_multiply_disk",
-	    "ds_grid_set_grid_region",
-	    "ds_grid_add_grid_region",
-	    "ds_grid_multiply_grid_region",
-	    "ds_grid_get",
-	    "ds_grid_get_sum",
-	    "ds_grid_get_max",
-	    "ds_grid_get_min",
-	    "ds_grid_get_mean",
-	    "ds_grid_get_disk_sum",
-	    "ds_grid_get_disk_min",
-	    "ds_grid_get_disk_max",
-	    "ds_grid_get_disk_mean",
-	    "ds_grid_value_exists",
-	    "ds_grid_value_x",
-	    "ds_grid_value_y",
-	    "ds_grid_value_disk_exists",
-	    "ds_grid_value_disk_x",
-	    "ds_grid_value_disk_y",
-	    "ds_grid_shuffle",
-	    "ds_grid_write",
-	    "ds_grid_read",
-	    "ds_grid_sort",
-	    "ds_grid_set",
-	    "ds_grid_get",
-	    "effect_create_below",
-	    "effect_create_above",
-	    "effect_clear",
-	    "part_type_create",
-	    "part_type_destroy",
-	    "part_type_exists",
-	    "part_type_clear",
-	    "part_type_shape",
-	    "part_type_sprite",
-	    "part_type_size",
-	    "part_type_scale",
-	    "part_type_orientation",
-	    "part_type_life",
-	    "part_type_step",
-	    "part_type_death",
-	    "part_type_speed",
-	    "part_type_direction",
-	    "part_type_gravity",
-	    "part_type_colour1",
-	    "part_type_colour2",
-	    "part_type_colour3",
-	    "part_type_colour_mix",
-	    "part_type_colour_rgb",
-	    "part_type_colour_hsv",
-	    "part_type_color1",
-	    "part_type_color2",
-	    "part_type_color3",
-	    "part_type_color_mix",
-	    "part_type_color_rgb",
-	    "part_type_color_hsv",
-	    "part_type_alpha1",
-	    "part_type_alpha2",
-	    "part_type_alpha3",
-	    "part_type_blend",
-	    "part_system_create",
-	    "part_system_create_layer",
-	    "part_system_destroy",
-	    "part_system_exists",
-	    "part_system_clear",
-	    "part_system_draw_order",
-	    "part_system_depth",
-	    "part_system_position",
-	    "part_system_automatic_update",
-	    "part_system_automatic_draw",
-	    "part_system_update",
-	    "part_system_drawit",
-	    "part_system_get_layer",
-	    "part_system_layer",
-	    "part_particles_create",
-	    "part_particles_create_colour",
-	    "part_particles_create_color",
-	    "part_particles_clear",
-	    "part_particles_count",
-	    "part_emitter_create",
-	    "part_emitter_destroy",
-	    "part_emitter_destroy_all",
-	    "part_emitter_exists",
-	    "part_emitter_clear",
-	    "part_emitter_region",
-	    "part_emitter_burst",
-	    "part_emitter_stream",
-	    "external_call",
-	    "external_define",
-	    "external_free",
-	    "window_handle",
-	    "window_device",
-	    "matrix_get",
-	    "matrix_set",
-	    "matrix_build_identity",
-	    "matrix_build",
-	    "matrix_build_lookat",
-	    "matrix_build_projection_ortho",
-	    "matrix_build_projection_perspective",
-	    "matrix_build_projection_perspective_fov",
-	    "matrix_multiply",
-	    "matrix_transform_vertex",
-	    "matrix_stack_push",
-	    "matrix_stack_pop",
-	    "matrix_stack_multiply",
-	    "matrix_stack_set",
-	    "matrix_stack_clear",
-	    "matrix_stack_top",
-	    "matrix_stack_is_empty",
-	    "browser_input_capture",
-	    "os_get_config",
-	    "os_get_info",
-	    "os_get_language",
-	    "os_get_region",
-	    "os_lock_orientation",
-	    "display_get_dpi_x",
-	    "display_get_dpi_y",
-	    "display_set_gui_size",
-	    "display_set_gui_maximise",
-	    "display_set_gui_maximize",
-	    "device_mouse_dbclick_enable",
-	    "display_set_timing_method",
-	    "display_get_timing_method",
-	    "display_set_sleep_margin",
-	    "display_get_sleep_margin",
-	    "virtual_key_add",
-	    "virtual_key_hide",
-	    "virtual_key_delete",
-	    "virtual_key_show",
-	    "draw_enable_drawevent",
-	    "draw_enable_swf_aa",
-	    "draw_set_swf_aa_level",
-	    "draw_get_swf_aa_level",
-	    "draw_texture_flush",
-	    "draw_flush",
-	    "gpu_set_blendenable",
-	    "gpu_set_ztestenable",
-	    "gpu_set_zfunc",
-	    "gpu_set_zwriteenable",
-	    "gpu_set_lightingenable",
-	    "gpu_set_fog",
-	    "gpu_set_cullmode",
-	    "gpu_set_blendmode",
-	    "gpu_set_blendmode_ext",
-	    "gpu_set_blendmode_ext_sepalpha",
-	    "gpu_set_colorwriteenable",
-	    "gpu_set_colourwriteenable",
-	    "gpu_set_alphatestenable",
-	    "gpu_set_alphatestref",
-	    "gpu_set_alphatestfunc",
-	    "gpu_set_texfilter",
-	    "gpu_set_texfilter_ext",
-	    "gpu_set_texrepeat",
-	    "gpu_set_texrepeat_ext",
-	    "gpu_set_tex_filter",
-	    "gpu_set_tex_filter_ext",
-	    "gpu_set_tex_repeat",
-	    "gpu_set_tex_repeat_ext",
-	    "gpu_set_tex_mip_filter",
-	    "gpu_set_tex_mip_filter_ext",
-	    "gpu_set_tex_mip_bias",
-	    "gpu_set_tex_mip_bias_ext",
-	    "gpu_set_tex_min_mip",
-	    "gpu_set_tex_min_mip_ext",
-	    "gpu_set_tex_max_mip",
-	    "gpu_set_tex_max_mip_ext",
-	    "gpu_set_tex_max_aniso",
-	    "gpu_set_tex_max_aniso_ext",
-	    "gpu_set_tex_mip_enable",
-	    "gpu_set_tex_mip_enable_ext",
-	    "gpu_get_blendenable",
-	    "gpu_get_ztestenable",
-	    "gpu_get_zfunc",
-	    "gpu_get_zwriteenable",
-	    "gpu_get_lightingenable",
-	    "gpu_get_fog",
-	    "gpu_get_cullmode",
-	    "gpu_get_blendmode",
-	    "gpu_get_blendmode_ext",
-	    "gpu_get_blendmode_ext_sepalpha",
-	    "gpu_get_blendmode_src",
-	    "gpu_get_blendmode_dest",
-	    "gpu_get_blendmode_srcalpha",
-	    "gpu_get_blendmode_destalpha",
-	    "gpu_get_colorwriteenable",
-	    "gpu_get_colourwriteenable",
-	    "gpu_get_alphatestenable",
-	    "gpu_get_alphatestref",
-	    "gpu_get_alphatestfunc",
-	    "gpu_get_texfilter",
-	    "gpu_get_texfilter_ext",
-	    "gpu_get_texrepeat",
-	    "gpu_get_texrepeat_ext",
-	    "gpu_get_tex_filter",
-	    "gpu_get_tex_filter_ext",
-	    "gpu_get_tex_repeat",
-	    "gpu_get_tex_repeat_ext",
-	    "gpu_get_tex_mip_filter",
-	    "gpu_get_tex_mip_filter_ext",
-	    "gpu_get_tex_mip_bias",
-	    "gpu_get_tex_mip_bias_ext",
-	    "gpu_get_tex_min_mip",
-	    "gpu_get_tex_min_mip_ext",
-	    "gpu_get_tex_max_mip",
-	    "gpu_get_tex_max_mip_ext",
-	    "gpu_get_tex_max_aniso",
-	    "gpu_get_tex_max_aniso_ext",
-	    "gpu_get_tex_mip_enable",
-	    "gpu_get_tex_mip_enable_ext",
-	    "gpu_push_state",
-	    "gpu_pop_state",
-	    "gpu_get_state",
-	    "gpu_set_state",
-	    "draw_light_define_ambient",
-	    "draw_light_define_direction",
-	    "draw_light_define_point",
-	    "draw_light_enable",
-	    "draw_set_lighting",
-	    "draw_light_get_ambient",
-	    "draw_light_get",
-	    "draw_get_lighting",
-	    "shop_leave_rating",
-	    "url_get_domain",
-	    "url_open",
-	    "url_open_ext",
-	    "url_open_full",
-	    "get_timer",
-	    "achievement_login",
-	    "achievement_logout",
-	    "achievement_post",
-	    "achievement_increment",
-	    "achievement_post_score",
-	    "achievement_available",
-	    "achievement_show_achievements",
-	    "achievement_show_leaderboards",
-	    "achievement_load_friends",
-	    "achievement_load_leaderboard",
-	    "achievement_send_challenge",
-	    "achievement_load_progress",
-	    "achievement_reset",
-	    "achievement_login_status",
-	    "achievement_get_pic",
-	    "achievement_show_challenge_notifications",
-	    "achievement_get_challenges",
-	    "achievement_event",
-	    "achievement_show",
-	    "achievement_get_info",
+	    "clipboard_get_text",
+	    "clipboard_has_text",
+	    "clipboard_set_text",
 	    "cloud_file_save",
 	    "cloud_string_save",
 	    "cloud_synchronise",
-	    "ads_enable",
-	    "ads_disable",
-	    "ads_setup",
-	    "ads_engagement_launch",
-	    "ads_engagement_available",
-	    "ads_engagement_active",
-	    "ads_event",
-	    "ads_event_preload",
-	    "ads_set_reward_callback",
-	    "ads_get_display_height",
-	    "ads_get_display_width",
-	    "ads_move",
-	    "ads_interstitial_available",
-	    "ads_interstitial_display",
+	    "code_is_compiled",
+	    "collision_circle",
+	    "collision_circle_list",
+	    "collision_ellipse",
+	    "collision_ellipse_list",
+	    "collision_line",
+	    "collision_line_list",
+	    "collision_point",
+	    "collision_point_list",
+	    "collision_rectangle",
+	    "collision_rectangle_list",
+	    "color_get_blue",
+	    "color_get_green",
+	    "color_get_hue",
+	    "color_get_red",
+	    "color_get_saturation",
+	    "color_get_value",
+	    "colour_get_blue",
+	    "colour_get_green",
+	    "colour_get_hue",
+	    "colour_get_red",
+	    "colour_get_saturation",
+	    "colour_get_value",
+	    "cos",
+	    "darccos",
+	    "darcsin",
+	    "darctan",
+	    "darctan2",
+	    "date_compare_date",
+	    "date_compare_datetime",
+	    "date_compare_time",
+	    "date_create_datetime",
+	    "date_current_datetime",
+	    "date_date_of",
+	    "date_date_string",
+	    "date_datetime_string",
+	    "date_day_span",
+	    "date_days_in_month",
+	    "date_days_in_year",
+	    "date_get_day",
+	    "date_get_day_of_year",
+	    "date_get_hour",
+	    "date_get_hour_of_year",
+	    "date_get_minute",
+	    "date_get_minute_of_year",
+	    "date_get_month",
+	    "date_get_second",
+	    "date_get_second_of_year",
+	    "date_get_timezone",
+	    "date_get_week",
+	    "date_get_weekday",
+	    "date_get_year",
+	    "date_hour_span",
+	    "date_inc_day",
+	    "date_inc_hour",
+	    "date_inc_minute",
+	    "date_inc_month",
+	    "date_inc_second",
+	    "date_inc_week",
+	    "date_inc_year",
+	    "date_is_today",
+	    "date_leap_year",
+	    "date_minute_span",
+	    "date_month_span",
+	    "date_second_span",
+	    "date_set_timezone",
+	    "date_time_of",
+	    "date_time_string",
+	    "date_valid_datetime",
+	    "date_week_span",
+	    "date_year_span",
+	    "db_to_lin",
+	    "dbg_add_font_glyphs",
+	    "dbg_button",
+	    "dbg_checkbox",
+	    "dbg_color",
+	    "dbg_colour",
+	    "dbg_drop_down",
+	    "dbg_same_line",
+	    "dbg_section",
+	    "dbg_section_delete",
+	    "dbg_section_exists",
+	    "dbg_slider",
+	    "dbg_slider_int",
+	    "dbg_sprite",
+	    "dbg_text",
+	    "dbg_text_input",
+	    "dbg_view",
+	    "dbg_view_delete",
+	    "dbg_view_exists",
+	    "dbg_watch",
+	    "dcos",
+	    "debug_event",
+	    "debug_get_callstack",
+	    "degtorad",
 	    "device_get_tilt_x",
 	    "device_get_tilt_y",
 	    "device_get_tilt_z",
@@ -19055,744 +18705,1936 @@ function requireGml () {
 	    "device_mouse_check_button",
 	    "device_mouse_check_button_pressed",
 	    "device_mouse_check_button_released",
-	    "device_mouse_x",
-	    "device_mouse_y",
+	    "device_mouse_dbclick_enable",
 	    "device_mouse_raw_x",
 	    "device_mouse_raw_y",
+	    "device_mouse_x",
 	    "device_mouse_x_to_gui",
+	    "device_mouse_y",
 	    "device_mouse_y_to_gui",
-	    "iap_activate",
-	    "iap_status",
-	    "iap_enumerate_products",
-	    "iap_restore_all",
-	    "iap_acquire",
-	    "iap_consume",
-	    "iap_product_details",
-	    "iap_purchase_details",
-	    "facebook_init",
-	    "facebook_login",
-	    "facebook_status",
-	    "facebook_graph_request",
-	    "facebook_dialog",
-	    "facebook_logout",
-	    "facebook_launch_offerwall",
-	    "facebook_post_message",
-	    "facebook_send_invite",
-	    "facebook_user_id",
-	    "facebook_accesstoken",
-	    "facebook_check_permission",
-	    "facebook_request_read_permissions",
-	    "facebook_request_publish_permissions",
-	    "gamepad_is_supported",
-	    "gamepad_get_device_count",
-	    "gamepad_is_connected",
-	    "gamepad_get_description",
-	    "gamepad_get_button_threshold",
-	    "gamepad_set_button_threshold",
-	    "gamepad_get_axis_deadzone",
-	    "gamepad_set_axis_deadzone",
-	    "gamepad_button_count",
+	    "directory_create",
+	    "directory_destroy",
+	    "directory_exists",
+	    "display_get_dpi_x",
+	    "display_get_dpi_y",
+	    "display_get_frequency",
+	    "display_get_gui_height",
+	    "display_get_gui_width",
+	    "display_get_height",
+	    "display_get_orientation",
+	    "display_get_sleep_margin",
+	    "display_get_timing_method",
+	    "display_get_width",
+	    "display_mouse_get_x",
+	    "display_mouse_get_y",
+	    "display_mouse_set",
+	    "display_reset",
+	    "display_set_gui_maximise",
+	    "display_set_gui_maximize",
+	    "display_set_gui_size",
+	    "display_set_sleep_margin",
+	    "display_set_timing_method",
+	    "display_set_ui_visibility",
+	    "distance_to_object",
+	    "distance_to_point",
+	    "dot_product",
+	    "dot_product_3d",
+	    "dot_product_3d_normalised",
+	    "dot_product_3d_normalized",
+	    "dot_product_normalised",
+	    "dot_product_normalized",
+	    "draw_arrow",
+	    "draw_button",
+	    "draw_circle",
+	    "draw_circle_color",
+	    "draw_circle_colour",
+	    "draw_clear",
+	    "draw_clear_alpha",
+	    "draw_ellipse",
+	    "draw_ellipse_color",
+	    "draw_ellipse_colour",
+	    "draw_enable_drawevent",
+	    "draw_enable_skeleton_blendmodes",
+	    "draw_enable_swf_aa",
+	    "draw_flush",
+	    "draw_get_alpha",
+	    "draw_get_color",
+	    "draw_get_colour",
+	    "draw_get_enable_skeleton_blendmodes",
+	    "draw_get_font",
+	    "draw_get_halign",
+	    "draw_get_lighting",
+	    "draw_get_swf_aa_level",
+	    "draw_get_valign",
+	    "draw_getpixel",
+	    "draw_getpixel_ext",
+	    "draw_healthbar",
+	    "draw_highscore",
+	    "draw_light_define_ambient",
+	    "draw_light_define_direction",
+	    "draw_light_define_point",
+	    "draw_light_enable",
+	    "draw_light_get",
+	    "draw_light_get_ambient",
+	    "draw_line",
+	    "draw_line_color",
+	    "draw_line_colour",
+	    "draw_line_width",
+	    "draw_line_width_color",
+	    "draw_line_width_colour",
+	    "draw_path",
+	    "draw_point",
+	    "draw_point_color",
+	    "draw_point_colour",
+	    "draw_primitive_begin",
+	    "draw_primitive_begin_texture",
+	    "draw_primitive_end",
+	    "draw_rectangle",
+	    "draw_rectangle_color",
+	    "draw_rectangle_colour",
+	    "draw_roundrect",
+	    "draw_roundrect_color",
+	    "draw_roundrect_color_ext",
+	    "draw_roundrect_colour",
+	    "draw_roundrect_colour_ext",
+	    "draw_roundrect_ext",
+	    "draw_self",
+	    "draw_set_alpha",
+	    "draw_set_circle_precision",
+	    "draw_set_color",
+	    "draw_set_colour",
+	    "draw_set_font",
+	    "draw_set_halign",
+	    "draw_set_lighting",
+	    "draw_set_swf_aa_level",
+	    "draw_set_valign",
+	    "draw_skeleton",
+	    "draw_skeleton_collision",
+	    "draw_skeleton_instance",
+	    "draw_skeleton_time",
+	    "draw_sprite",
+	    "draw_sprite_ext",
+	    "draw_sprite_general",
+	    "draw_sprite_part",
+	    "draw_sprite_part_ext",
+	    "draw_sprite_pos",
+	    "draw_sprite_stretched",
+	    "draw_sprite_stretched_ext",
+	    "draw_sprite_tiled",
+	    "draw_sprite_tiled_ext",
+	    "draw_surface",
+	    "draw_surface_ext",
+	    "draw_surface_general",
+	    "draw_surface_part",
+	    "draw_surface_part_ext",
+	    "draw_surface_stretched",
+	    "draw_surface_stretched_ext",
+	    "draw_surface_tiled",
+	    "draw_surface_tiled_ext",
+	    "draw_text",
+	    "draw_text_color",
+	    "draw_text_colour",
+	    "draw_text_ext",
+	    "draw_text_ext_color",
+	    "draw_text_ext_colour",
+	    "draw_text_ext_transformed",
+	    "draw_text_ext_transformed_color",
+	    "draw_text_ext_transformed_colour",
+	    "draw_text_transformed",
+	    "draw_text_transformed_color",
+	    "draw_text_transformed_colour",
+	    "draw_texture_flush",
+	    "draw_tile",
+	    "draw_tilemap",
+	    "draw_triangle",
+	    "draw_triangle_color",
+	    "draw_triangle_colour",
+	    "draw_vertex",
+	    "draw_vertex_color",
+	    "draw_vertex_colour",
+	    "draw_vertex_texture",
+	    "draw_vertex_texture_color",
+	    "draw_vertex_texture_colour",
+	    "ds_exists",
+	    "ds_grid_add",
+	    "ds_grid_add_disk",
+	    "ds_grid_add_grid_region",
+	    "ds_grid_add_region",
+	    "ds_grid_clear",
+	    "ds_grid_copy",
+	    "ds_grid_create",
+	    "ds_grid_destroy",
+	    "ds_grid_get",
+	    "ds_grid_get_disk_max",
+	    "ds_grid_get_disk_mean",
+	    "ds_grid_get_disk_min",
+	    "ds_grid_get_disk_sum",
+	    "ds_grid_get_max",
+	    "ds_grid_get_mean",
+	    "ds_grid_get_min",
+	    "ds_grid_get_sum",
+	    "ds_grid_height",
+	    "ds_grid_multiply",
+	    "ds_grid_multiply_disk",
+	    "ds_grid_multiply_grid_region",
+	    "ds_grid_multiply_region",
+	    "ds_grid_read",
+	    "ds_grid_resize",
+	    "ds_grid_set",
+	    "ds_grid_set_disk",
+	    "ds_grid_set_grid_region",
+	    "ds_grid_set_region",
+	    "ds_grid_shuffle",
+	    "ds_grid_sort",
+	    "ds_grid_to_mp_grid",
+	    "ds_grid_value_disk_exists",
+	    "ds_grid_value_disk_x",
+	    "ds_grid_value_disk_y",
+	    "ds_grid_value_exists",
+	    "ds_grid_value_x",
+	    "ds_grid_value_y",
+	    "ds_grid_width",
+	    "ds_grid_write",
+	    "ds_list_add",
+	    "ds_list_clear",
+	    "ds_list_copy",
+	    "ds_list_create",
+	    "ds_list_delete",
+	    "ds_list_destroy",
+	    "ds_list_empty",
+	    "ds_list_find_index",
+	    "ds_list_find_value",
+	    "ds_list_insert",
+	    "ds_list_is_list",
+	    "ds_list_is_map",
+	    "ds_list_mark_as_list",
+	    "ds_list_mark_as_map",
+	    "ds_list_read",
+	    "ds_list_replace",
+	    "ds_list_set",
+	    "ds_list_shuffle",
+	    "ds_list_size",
+	    "ds_list_sort",
+	    "ds_list_write",
+	    "ds_map_add",
+	    "ds_map_add_list",
+	    "ds_map_add_map",
+	    "ds_map_clear",
+	    "ds_map_copy",
+	    "ds_map_create",
+	    "ds_map_delete",
+	    "ds_map_destroy",
+	    "ds_map_empty",
+	    "ds_map_exists",
+	    "ds_map_find_first",
+	    "ds_map_find_last",
+	    "ds_map_find_next",
+	    "ds_map_find_previous",
+	    "ds_map_find_value",
+	    "ds_map_is_list",
+	    "ds_map_is_map",
+	    "ds_map_keys_to_array",
+	    "ds_map_read",
+	    "ds_map_replace",
+	    "ds_map_replace_list",
+	    "ds_map_replace_map",
+	    "ds_map_secure_load",
+	    "ds_map_secure_load_buffer",
+	    "ds_map_secure_save",
+	    "ds_map_secure_save_buffer",
+	    "ds_map_set",
+	    "ds_map_size",
+	    "ds_map_values_to_array",
+	    "ds_map_write",
+	    "ds_priority_add",
+	    "ds_priority_change_priority",
+	    "ds_priority_clear",
+	    "ds_priority_copy",
+	    "ds_priority_create",
+	    "ds_priority_delete_max",
+	    "ds_priority_delete_min",
+	    "ds_priority_delete_value",
+	    "ds_priority_destroy",
+	    "ds_priority_empty",
+	    "ds_priority_find_max",
+	    "ds_priority_find_min",
+	    "ds_priority_find_priority",
+	    "ds_priority_read",
+	    "ds_priority_size",
+	    "ds_priority_write",
+	    "ds_queue_clear",
+	    "ds_queue_copy",
+	    "ds_queue_create",
+	    "ds_queue_dequeue",
+	    "ds_queue_destroy",
+	    "ds_queue_empty",
+	    "ds_queue_enqueue",
+	    "ds_queue_head",
+	    "ds_queue_read",
+	    "ds_queue_size",
+	    "ds_queue_tail",
+	    "ds_queue_write",
+	    "ds_set_precision",
+	    "ds_stack_clear",
+	    "ds_stack_copy",
+	    "ds_stack_create",
+	    "ds_stack_destroy",
+	    "ds_stack_empty",
+	    "ds_stack_pop",
+	    "ds_stack_push",
+	    "ds_stack_read",
+	    "ds_stack_size",
+	    "ds_stack_top",
+	    "ds_stack_write",
+	    "dsin",
+	    "dtan",
+	    "effect_clear",
+	    "effect_create_above",
+	    "effect_create_below",
+	    "effect_create_depth",
+	    "effect_create_layer",
+	    "environment_get_variable",
+	    "event_inherited",
+	    "event_perform",
+	    "event_perform_async",
+	    "event_perform_object",
+	    "event_user",
+	    "exception_unhandled_handler",
+	    "exp",
+	    "extension_exists",
+	    "extension_get_option_count",
+	    "extension_get_option_names",
+	    "extension_get_option_value",
+	    "extension_get_options",
+	    "extension_get_version",
+	    "external_call",
+	    "external_define",
+	    "external_free",
+	    "file_attributes",
+	    "file_bin_close",
+	    "file_bin_open",
+	    "file_bin_position",
+	    "file_bin_read_byte",
+	    "file_bin_rewrite",
+	    "file_bin_seek",
+	    "file_bin_size",
+	    "file_bin_write_byte",
+	    "file_copy",
+	    "file_delete",
+	    "file_exists",
+	    "file_find_close",
+	    "file_find_first",
+	    "file_find_next",
+	    "file_rename",
+	    "file_text_close",
+	    "file_text_eof",
+	    "file_text_eoln",
+	    "file_text_open_append",
+	    "file_text_open_from_string",
+	    "file_text_open_read",
+	    "file_text_open_write",
+	    "file_text_read_real",
+	    "file_text_read_string",
+	    "file_text_readln",
+	    "file_text_write_real",
+	    "file_text_write_string",
+	    "file_text_writeln",
+	    "filename_change_ext",
+	    "filename_dir",
+	    "filename_drive",
+	    "filename_ext",
+	    "filename_name",
+	    "filename_path",
+	    "floor",
+	    "font_add",
+	    "font_add_enable_aa",
+	    "font_add_get_enable_aa",
+	    "font_add_sprite",
+	    "font_add_sprite_ext",
+	    "font_cache_glyph",
+	    "font_delete",
+	    "font_enable_effects",
+	    "font_enable_sdf",
+	    "font_exists",
+	    "font_get_bold",
+	    "font_get_first",
+	    "font_get_fontname",
+	    "font_get_info",
+	    "font_get_italic",
+	    "font_get_last",
+	    "font_get_name",
+	    "font_get_sdf_enabled",
+	    "font_get_sdf_spread",
+	    "font_get_size",
+	    "font_get_texture",
+	    "font_get_uvs",
+	    "font_replace_sprite",
+	    "font_replace_sprite_ext",
+	    "font_sdf_spread",
+	    "font_set_cache_size",
+	    "frac",
+	    "fx_create",
+	    "fx_get_name",
+	    "fx_get_parameter",
+	    "fx_get_parameter_names",
+	    "fx_get_parameters",
+	    "fx_get_single_layer",
+	    "fx_set_parameter",
+	    "fx_set_parameters",
+	    "fx_set_single_layer",
+	    "game_change",
+	    "game_end",
+	    "game_get_speed",
+	    "game_load",
+	    "game_load_buffer",
+	    "game_restart",
+	    "game_save",
+	    "game_save_buffer",
+	    "game_set_speed",
+	    "gamepad_axis_count",
+	    "gamepad_axis_value",
 	    "gamepad_button_check",
 	    "gamepad_button_check_pressed",
 	    "gamepad_button_check_released",
+	    "gamepad_button_count",
 	    "gamepad_button_value",
-	    "gamepad_axis_count",
-	    "gamepad_axis_value",
-	    "gamepad_set_vibration",
-	    "gamepad_set_colour",
+	    "gamepad_get_axis_deadzone",
+	    "gamepad_get_button_threshold",
+	    "gamepad_get_description",
+	    "gamepad_get_device_count",
+	    "gamepad_get_guid",
+	    "gamepad_get_mapping",
+	    "gamepad_get_option",
+	    "gamepad_hat_count",
+	    "gamepad_hat_value",
+	    "gamepad_is_connected",
+	    "gamepad_is_supported",
+	    "gamepad_remove_mapping",
+	    "gamepad_set_axis_deadzone",
+	    "gamepad_set_button_threshold",
 	    "gamepad_set_color",
-	    "os_is_paused",
-	    "window_has_focus",
-	    "code_is_compiled",
+	    "gamepad_set_colour",
+	    "gamepad_set_option",
+	    "gamepad_set_vibration",
+	    "gamepad_test_mapping",
+	    "gc_collect",
+	    "gc_enable",
+	    "gc_get_stats",
+	    "gc_get_target_frame_time",
+	    "gc_is_enabled",
+	    "gc_target_frame_time",
+	    "gesture_double_tap_distance",
+	    "gesture_double_tap_time",
+	    "gesture_drag_distance",
+	    "gesture_drag_time",
+	    "gesture_flick_speed",
+	    "gesture_get_double_tap_distance",
+	    "gesture_get_double_tap_time",
+	    "gesture_get_drag_distance",
+	    "gesture_get_drag_time",
+	    "gesture_get_flick_speed",
+	    "gesture_get_pinch_angle_away",
+	    "gesture_get_pinch_angle_towards",
+	    "gesture_get_pinch_distance",
+	    "gesture_get_rotate_angle",
+	    "gesture_get_rotate_time",
+	    "gesture_get_tap_count",
+	    "gesture_pinch_angle_away",
+	    "gesture_pinch_angle_towards",
+	    "gesture_pinch_distance",
+	    "gesture_rotate_angle",
+	    "gesture_rotate_time",
+	    "gesture_tap_count",
+	    "get_integer",
+	    "get_integer_async",
+	    "get_login_async",
+	    "get_open_filename",
+	    "get_open_filename_ext",
+	    "get_save_filename",
+	    "get_save_filename_ext",
+	    "get_string",
+	    "get_string_async",
+	    "get_timer",
+	    "gif_add_surface",
+	    "gif_open",
+	    "gif_save",
+	    "gif_save_buffer",
+	    "gml_pragma",
+	    "gml_release_mode",
+	    "gpu_get_alphatestenable",
+	    "gpu_get_alphatestref",
+	    "gpu_get_blendenable",
+	    "gpu_get_blendmode",
+	    "gpu_get_blendmode_dest",
+	    "gpu_get_blendmode_destalpha",
+	    "gpu_get_blendmode_ext",
+	    "gpu_get_blendmode_ext_sepalpha",
+	    "gpu_get_blendmode_src",
+	    "gpu_get_blendmode_srcalpha",
+	    "gpu_get_colorwriteenable",
+	    "gpu_get_colourwriteenable",
+	    "gpu_get_cullmode",
+	    "gpu_get_depth",
+	    "gpu_get_fog",
+	    "gpu_get_state",
+	    "gpu_get_tex_filter",
+	    "gpu_get_tex_filter_ext",
+	    "gpu_get_tex_max_aniso",
+	    "gpu_get_tex_max_aniso_ext",
+	    "gpu_get_tex_max_mip",
+	    "gpu_get_tex_max_mip_ext",
+	    "gpu_get_tex_min_mip",
+	    "gpu_get_tex_min_mip_ext",
+	    "gpu_get_tex_mip_bias",
+	    "gpu_get_tex_mip_bias_ext",
+	    "gpu_get_tex_mip_enable",
+	    "gpu_get_tex_mip_enable_ext",
+	    "gpu_get_tex_mip_filter",
+	    "gpu_get_tex_mip_filter_ext",
+	    "gpu_get_tex_repeat",
+	    "gpu_get_tex_repeat_ext",
+	    "gpu_get_texfilter",
+	    "gpu_get_texfilter_ext",
+	    "gpu_get_texrepeat",
+	    "gpu_get_texrepeat_ext",
+	    "gpu_get_zfunc",
+	    "gpu_get_ztestenable",
+	    "gpu_get_zwriteenable",
+	    "gpu_pop_state",
+	    "gpu_push_state",
+	    "gpu_set_alphatestenable",
+	    "gpu_set_alphatestref",
+	    "gpu_set_blendenable",
+	    "gpu_set_blendmode",
+	    "gpu_set_blendmode_ext",
+	    "gpu_set_blendmode_ext_sepalpha",
+	    "gpu_set_colorwriteenable",
+	    "gpu_set_colourwriteenable",
+	    "gpu_set_cullmode",
+	    "gpu_set_depth",
+	    "gpu_set_fog",
+	    "gpu_set_state",
+	    "gpu_set_tex_filter",
+	    "gpu_set_tex_filter_ext",
+	    "gpu_set_tex_max_aniso",
+	    "gpu_set_tex_max_aniso_ext",
+	    "gpu_set_tex_max_mip",
+	    "gpu_set_tex_max_mip_ext",
+	    "gpu_set_tex_min_mip",
+	    "gpu_set_tex_min_mip_ext",
+	    "gpu_set_tex_mip_bias",
+	    "gpu_set_tex_mip_bias_ext",
+	    "gpu_set_tex_mip_enable",
+	    "gpu_set_tex_mip_enable_ext",
+	    "gpu_set_tex_mip_filter",
+	    "gpu_set_tex_mip_filter_ext",
+	    "gpu_set_tex_repeat",
+	    "gpu_set_tex_repeat_ext",
+	    "gpu_set_texfilter",
+	    "gpu_set_texfilter_ext",
+	    "gpu_set_texrepeat",
+	    "gpu_set_texrepeat_ext",
+	    "gpu_set_zfunc",
+	    "gpu_set_ztestenable",
+	    "gpu_set_zwriteenable",
+	    "handle_parse",
+	    "highscore_add",
+	    "highscore_clear",
+	    "highscore_name",
+	    "highscore_value",
 	    "http_get",
 	    "http_get_file",
+	    "http_get_request_crossorigin",
 	    "http_post_string",
 	    "http_request",
-	    "json_encode",
+	    "http_set_request_crossorigin",
+	    "iap_acquire",
+	    "iap_activate",
+	    "iap_consume",
+	    "iap_enumerate_products",
+	    "iap_product_details",
+	    "iap_purchase_details",
+	    "iap_restore_all",
+	    "iap_status",
+	    "ini_close",
+	    "ini_key_delete",
+	    "ini_key_exists",
+	    "ini_open",
+	    "ini_open_from_string",
+	    "ini_read_real",
+	    "ini_read_string",
+	    "ini_section_delete",
+	    "ini_section_exists",
+	    "ini_write_real",
+	    "ini_write_string",
+	    "instance_activate_all",
+	    "instance_activate_layer",
+	    "instance_activate_object",
+	    "instance_activate_region",
+	    "instance_change",
+	    "instance_copy",
+	    "instance_create_depth",
+	    "instance_create_layer",
+	    "instance_deactivate_all",
+	    "instance_deactivate_layer",
+	    "instance_deactivate_object",
+	    "instance_deactivate_region",
+	    "instance_destroy",
+	    "instance_exists",
+	    "instance_find",
+	    "instance_furthest",
+	    "instance_id_get",
+	    "instance_nearest",
+	    "instance_number",
+	    "instance_place",
+	    "instance_place_list",
+	    "instance_position",
+	    "instance_position_list",
+	    "instanceof",
+	    "int64",
+	    "io_clear",
+	    "irandom",
+	    "irandom_range",
+	    "is_array",
+	    "is_bool",
+	    "is_callable",
+	    "is_debug_overlay_open",
+	    "is_handle",
+	    "is_infinity",
+	    "is_instanceof",
+	    "is_int32",
+	    "is_int64",
+	    "is_keyboard_used_debug_overlay",
+	    "is_method",
+	    "is_mouse_over_debug_overlay",
+	    "is_nan",
+	    "is_numeric",
+	    "is_ptr",
+	    "is_real",
+	    "is_string",
+	    "is_struct",
+	    "is_undefined",
 	    "json_decode",
-	    "zip_unzip",
-	    "load_csv",
-	    "base64_encode",
-	    "base64_decode",
-	    "md5_string_unicode",
-	    "md5_string_utf8",
-	    "md5_file",
-	    "os_is_network_connected",
-	    "sha1_string_unicode",
-	    "sha1_string_utf8",
-	    "sha1_file",
-	    "os_powersave_enable",
-	    "analytics_event",
-	    "analytics_event_ext",
-	    "win8_livetile_tile_notification",
-	    "win8_livetile_tile_clear",
-	    "win8_livetile_badge_notification",
-	    "win8_livetile_badge_clear",
-	    "win8_livetile_queue_enable",
-	    "win8_secondarytile_pin",
-	    "win8_secondarytile_badge_notification",
-	    "win8_secondarytile_delete",
-	    "win8_livetile_notification_begin",
-	    "win8_livetile_notification_secondary_begin",
-	    "win8_livetile_notification_expiry",
-	    "win8_livetile_notification_tag",
-	    "win8_livetile_notification_text_add",
-	    "win8_livetile_notification_image_add",
-	    "win8_livetile_notification_end",
-	    "win8_appbar_enable",
-	    "win8_appbar_add_element",
-	    "win8_appbar_remove_element",
-	    "win8_settingscharm_add_entry",
-	    "win8_settingscharm_add_html_entry",
-	    "win8_settingscharm_add_xaml_entry",
-	    "win8_settingscharm_set_xaml_property",
-	    "win8_settingscharm_get_xaml_property",
-	    "win8_settingscharm_remove_entry",
-	    "win8_share_image",
-	    "win8_share_screenshot",
-	    "win8_share_file",
-	    "win8_share_url",
-	    "win8_share_text",
-	    "win8_search_enable",
-	    "win8_search_disable",
-	    "win8_search_add_suggestions",
-	    "win8_device_touchscreen_available",
-	    "win8_license_initialize_sandbox",
-	    "win8_license_trial_version",
-	    "winphone_license_trial_version",
-	    "winphone_tile_title",
-	    "winphone_tile_count",
-	    "winphone_tile_back_title",
-	    "winphone_tile_back_content",
-	    "winphone_tile_back_content_wide",
-	    "winphone_tile_front_image",
-	    "winphone_tile_front_image_small",
-	    "winphone_tile_front_image_wide",
-	    "winphone_tile_back_image",
-	    "winphone_tile_back_image_wide",
-	    "winphone_tile_background_colour",
-	    "winphone_tile_background_color",
-	    "winphone_tile_icon_image",
-	    "winphone_tile_small_icon_image",
-	    "winphone_tile_wide_content",
-	    "winphone_tile_cycle_images",
-	    "winphone_tile_small_background_image",
-	    "physics_world_create",
-	    "physics_world_gravity",
-	    "physics_world_update_speed",
-	    "physics_world_update_iterations",
-	    "physics_world_draw_debug",
-	    "physics_pause_enable",
-	    "physics_fixture_create",
-	    "physics_fixture_set_kinematic",
-	    "physics_fixture_set_density",
-	    "physics_fixture_set_awake",
-	    "physics_fixture_set_restitution",
-	    "physics_fixture_set_friction",
-	    "physics_fixture_set_collision_group",
-	    "physics_fixture_set_sensor",
-	    "physics_fixture_set_linear_damping",
-	    "physics_fixture_set_angular_damping",
-	    "physics_fixture_set_circle_shape",
-	    "physics_fixture_set_box_shape",
-	    "physics_fixture_set_edge_shape",
-	    "physics_fixture_set_polygon_shape",
-	    "physics_fixture_set_chain_shape",
-	    "physics_fixture_add_point",
-	    "physics_fixture_bind",
-	    "physics_fixture_bind_ext",
-	    "physics_fixture_delete",
-	    "physics_apply_force",
-	    "physics_apply_impulse",
-	    "physics_apply_angular_impulse",
-	    "physics_apply_local_force",
-	    "physics_apply_local_impulse",
-	    "physics_apply_torque",
-	    "physics_mass_properties",
-	    "physics_draw_debug",
-	    "physics_test_overlap",
-	    "physics_remove_fixture",
-	    "physics_set_friction",
-	    "physics_set_density",
-	    "physics_set_restitution",
-	    "physics_get_friction",
-	    "physics_get_density",
-	    "physics_get_restitution",
-	    "physics_joint_distance_create",
-	    "physics_joint_rope_create",
-	    "physics_joint_revolute_create",
-	    "physics_joint_prismatic_create",
-	    "physics_joint_pulley_create",
-	    "physics_joint_wheel_create",
-	    "physics_joint_weld_create",
-	    "physics_joint_friction_create",
-	    "physics_joint_gear_create",
-	    "physics_joint_enable_motor",
-	    "physics_joint_get_value",
-	    "physics_joint_set_value",
-	    "physics_joint_delete",
-	    "physics_particle_create",
-	    "physics_particle_delete",
-	    "physics_particle_delete_region_circle",
-	    "physics_particle_delete_region_box",
-	    "physics_particle_delete_region_poly",
-	    "physics_particle_set_flags",
-	    "physics_particle_set_category_flags",
-	    "physics_particle_draw",
-	    "physics_particle_draw_ext",
-	    "physics_particle_count",
-	    "physics_particle_get_data",
-	    "physics_particle_get_data_particle",
-	    "physics_particle_group_begin",
-	    "physics_particle_group_circle",
-	    "physics_particle_group_box",
-	    "physics_particle_group_polygon",
-	    "physics_particle_group_add_point",
-	    "physics_particle_group_end",
-	    "physics_particle_group_join",
-	    "physics_particle_group_delete",
-	    "physics_particle_group_count",
-	    "physics_particle_group_get_data",
-	    "physics_particle_group_get_mass",
-	    "physics_particle_group_get_inertia",
-	    "physics_particle_group_get_centre_x",
-	    "physics_particle_group_get_centre_y",
-	    "physics_particle_group_get_vel_x",
-	    "physics_particle_group_get_vel_y",
-	    "physics_particle_group_get_ang_vel",
-	    "physics_particle_group_get_x",
-	    "physics_particle_group_get_y",
-	    "physics_particle_group_get_angle",
-	    "physics_particle_set_group_flags",
-	    "physics_particle_get_group_flags",
-	    "physics_particle_get_max_count",
-	    "physics_particle_get_radius",
-	    "physics_particle_get_density",
-	    "physics_particle_get_damping",
-	    "physics_particle_get_gravity_scale",
-	    "physics_particle_set_max_count",
-	    "physics_particle_set_radius",
-	    "physics_particle_set_density",
-	    "physics_particle_set_damping",
-	    "physics_particle_set_gravity_scale",
-	    "network_create_socket",
-	    "network_create_socket_ext",
-	    "network_create_server",
-	    "network_create_server_raw",
-	    "network_connect",
-	    "network_connect_raw",
-	    "network_send_packet",
-	    "network_send_raw",
-	    "network_send_broadcast",
-	    "network_send_udp",
-	    "network_send_udp_raw",
-	    "network_set_timeout",
-	    "network_set_config",
-	    "network_resolve",
-	    "network_destroy",
-	    "buffer_create",
-	    "buffer_write",
-	    "buffer_read",
-	    "buffer_seek",
-	    "buffer_get_surface",
-	    "buffer_set_surface",
-	    "buffer_delete",
-	    "buffer_exists",
-	    "buffer_get_type",
-	    "buffer_get_alignment",
-	    "buffer_poke",
-	    "buffer_peek",
-	    "buffer_save",
-	    "buffer_save_ext",
-	    "buffer_load",
-	    "buffer_load_ext",
-	    "buffer_load_partial",
-	    "buffer_copy",
-	    "buffer_fill",
-	    "buffer_get_size",
-	    "buffer_tell",
-	    "buffer_resize",
-	    "buffer_md5",
-	    "buffer_sha1",
-	    "buffer_base64_encode",
-	    "buffer_base64_decode",
-	    "buffer_base64_decode_ext",
-	    "buffer_sizeof",
-	    "buffer_get_address",
-	    "buffer_create_from_vertex_buffer",
-	    "buffer_create_from_vertex_buffer_ext",
-	    "buffer_copy_from_vertex_buffer",
-	    "buffer_async_group_begin",
-	    "buffer_async_group_option",
-	    "buffer_async_group_end",
-	    "buffer_load_async",
-	    "buffer_save_async",
-	    "gml_release_mode",
-	    "gml_pragma",
-	    "steam_activate_overlay",
-	    "steam_is_overlay_enabled",
-	    "steam_is_overlay_activated",
-	    "steam_get_persona_name",
-	    "steam_initialised",
-	    "steam_is_cloud_enabled_for_app",
-	    "steam_is_cloud_enabled_for_account",
-	    "steam_file_persisted",
-	    "steam_get_quota_total",
-	    "steam_get_quota_free",
-	    "steam_file_write",
-	    "steam_file_write_file",
-	    "steam_file_read",
-	    "steam_file_delete",
-	    "steam_file_exists",
-	    "steam_file_size",
-	    "steam_file_share",
-	    "steam_is_screenshot_requested",
-	    "steam_send_screenshot",
-	    "steam_is_user_logged_on",
-	    "steam_get_user_steam_id",
-	    "steam_user_owns_dlc",
-	    "steam_user_installed_dlc",
-	    "steam_set_achievement",
-	    "steam_get_achievement",
-	    "steam_clear_achievement",
-	    "steam_set_stat_int",
-	    "steam_set_stat_float",
-	    "steam_set_stat_avg_rate",
-	    "steam_get_stat_int",
-	    "steam_get_stat_float",
-	    "steam_get_stat_avg_rate",
-	    "steam_reset_all_stats",
-	    "steam_reset_all_stats_achievements",
-	    "steam_stats_ready",
-	    "steam_create_leaderboard",
-	    "steam_upload_score",
-	    "steam_upload_score_ext",
-	    "steam_download_scores_around_user",
-	    "steam_download_scores",
-	    "steam_download_friends_scores",
-	    "steam_upload_score_buffer",
-	    "steam_upload_score_buffer_ext",
-	    "steam_current_game_language",
-	    "steam_available_languages",
-	    "steam_activate_overlay_browser",
-	    "steam_activate_overlay_user",
-	    "steam_activate_overlay_store",
-	    "steam_get_user_persona_name",
-	    "steam_get_app_id",
-	    "steam_get_user_account_id",
-	    "steam_ugc_download",
-	    "steam_ugc_create_item",
-	    "steam_ugc_start_item_update",
-	    "steam_ugc_set_item_title",
-	    "steam_ugc_set_item_description",
-	    "steam_ugc_set_item_visibility",
-	    "steam_ugc_set_item_tags",
-	    "steam_ugc_set_item_content",
-	    "steam_ugc_set_item_preview",
-	    "steam_ugc_submit_item_update",
-	    "steam_ugc_get_item_update_progress",
-	    "steam_ugc_subscribe_item",
-	    "steam_ugc_unsubscribe_item",
-	    "steam_ugc_num_subscribed_items",
-	    "steam_ugc_get_subscribed_items",
-	    "steam_ugc_get_item_install_info",
-	    "steam_ugc_get_item_update_info",
-	    "steam_ugc_request_item_details",
-	    "steam_ugc_create_query_user",
-	    "steam_ugc_create_query_user_ex",
-	    "steam_ugc_create_query_all",
-	    "steam_ugc_create_query_all_ex",
-	    "steam_ugc_query_set_cloud_filename_filter",
-	    "steam_ugc_query_set_match_any_tag",
-	    "steam_ugc_query_set_search_text",
-	    "steam_ugc_query_set_ranked_by_trend_days",
-	    "steam_ugc_query_add_required_tag",
-	    "steam_ugc_query_add_excluded_tag",
-	    "steam_ugc_query_set_return_long_description",
-	    "steam_ugc_query_set_return_total_only",
-	    "steam_ugc_query_set_allow_cached_response",
-	    "steam_ugc_send_query",
-	    "shader_set",
-	    "shader_get_name",
-	    "shader_reset",
-	    "shader_current",
-	    "shader_is_compiled",
-	    "shader_get_sampler_index",
-	    "shader_get_uniform",
-	    "shader_set_uniform_i",
-	    "shader_set_uniform_i_array",
-	    "shader_set_uniform_f",
-	    "shader_set_uniform_f_array",
-	    "shader_set_uniform_matrix",
-	    "shader_set_uniform_matrix_array",
-	    "shader_enable_corner_id",
-	    "texture_set_stage",
-	    "texture_get_texel_width",
-	    "texture_get_texel_height",
-	    "shaders_are_supported",
-	    "vertex_format_begin",
-	    "vertex_format_end",
-	    "vertex_format_delete",
-	    "vertex_format_add_position",
-	    "vertex_format_add_position_3d",
-	    "vertex_format_add_colour",
-	    "vertex_format_add_color",
-	    "vertex_format_add_normal",
-	    "vertex_format_add_texcoord",
-	    "vertex_format_add_textcoord",
-	    "vertex_format_add_custom",
-	    "vertex_create_buffer",
-	    "vertex_create_buffer_ext",
-	    "vertex_delete_buffer",
-	    "vertex_begin",
-	    "vertex_end",
-	    "vertex_position",
-	    "vertex_position_3d",
-	    "vertex_colour",
-	    "vertex_color",
-	    "vertex_argb",
-	    "vertex_texcoord",
-	    "vertex_normal",
-	    "vertex_float1",
-	    "vertex_float2",
-	    "vertex_float3",
-	    "vertex_float4",
-	    "vertex_ubyte4",
-	    "vertex_submit",
-	    "vertex_freeze",
-	    "vertex_get_number",
-	    "vertex_get_buffer_size",
-	    "vertex_create_buffer_from_buffer",
-	    "vertex_create_buffer_from_buffer_ext",
-	    "push_local_notification",
-	    "push_get_first_local_notification",
-	    "push_get_next_local_notification",
-	    "push_cancel_local_notification",
-	    "skeleton_animation_set",
-	    "skeleton_animation_get",
-	    "skeleton_animation_mix",
-	    "skeleton_animation_set_ext",
-	    "skeleton_animation_get_ext",
-	    "skeleton_animation_get_duration",
-	    "skeleton_animation_get_frames",
-	    "skeleton_animation_clear",
-	    "skeleton_skin_set",
-	    "skeleton_skin_get",
-	    "skeleton_attachment_set",
-	    "skeleton_attachment_get",
-	    "skeleton_attachment_create",
-	    "skeleton_collision_draw_set",
-	    "skeleton_bone_data_get",
-	    "skeleton_bone_data_set",
-	    "skeleton_bone_state_get",
-	    "skeleton_bone_state_set",
-	    "skeleton_get_minmax",
-	    "skeleton_get_num_bounds",
-	    "skeleton_get_bounds",
-	    "skeleton_animation_get_frame",
-	    "skeleton_animation_set_frame",
-	    "draw_skeleton",
-	    "draw_skeleton_time",
-	    "draw_skeleton_instance",
-	    "draw_skeleton_collision",
-	    "skeleton_animation_list",
-	    "skeleton_skin_list",
-	    "skeleton_slot_data",
-	    "layer_get_id",
-	    "layer_get_id_at_depth",
-	    "layer_get_depth",
+	    "json_encode",
+	    "json_parse",
+	    "json_stringify",
+	    "keyboard_check",
+	    "keyboard_check_direct",
+	    "keyboard_check_pressed",
+	    "keyboard_check_released",
+	    "keyboard_clear",
+	    "keyboard_get_map",
+	    "keyboard_get_numlock",
+	    "keyboard_key_press",
+	    "keyboard_key_release",
+	    "keyboard_set_map",
+	    "keyboard_set_numlock",
+	    "keyboard_unset_map",
+	    "keyboard_virtual_height",
+	    "keyboard_virtual_hide",
+	    "keyboard_virtual_show",
+	    "keyboard_virtual_status",
+	    "layer_add_instance",
+	    "layer_background_alpha",
+	    "layer_background_blend",
+	    "layer_background_change",
+	    "layer_background_create",
+	    "layer_background_destroy",
+	    "layer_background_exists",
+	    "layer_background_get_alpha",
+	    "layer_background_get_blend",
+	    "layer_background_get_htiled",
+	    "layer_background_get_id",
+	    "layer_background_get_index",
+	    "layer_background_get_speed",
+	    "layer_background_get_sprite",
+	    "layer_background_get_stretch",
+	    "layer_background_get_visible",
+	    "layer_background_get_vtiled",
+	    "layer_background_get_xscale",
+	    "layer_background_get_yscale",
+	    "layer_background_htiled",
+	    "layer_background_index",
+	    "layer_background_speed",
+	    "layer_background_sprite",
+	    "layer_background_stretch",
+	    "layer_background_visible",
+	    "layer_background_vtiled",
+	    "layer_background_xscale",
+	    "layer_background_yscale",
+	    "layer_clear_fx",
 	    "layer_create",
+	    "layer_depth",
 	    "layer_destroy",
 	    "layer_destroy_instances",
-	    "layer_add_instance",
-	    "layer_has_instance",
-	    "layer_set_visible",
-	    "layer_get_visible",
+	    "layer_element_move",
+	    "layer_enable_fx",
 	    "layer_exists",
-	    "layer_x",
-	    "layer_y",
-	    "layer_get_x",
-	    "layer_get_y",
-	    "layer_hspeed",
-	    "layer_vspeed",
+	    "layer_force_draw_depth",
+	    "layer_fx_is_enabled",
+	    "layer_get_all",
+	    "layer_get_all_elements",
+	    "layer_get_depth",
+	    "layer_get_element_layer",
+	    "layer_get_element_type",
+	    "layer_get_forced_depth",
+	    "layer_get_fx",
 	    "layer_get_hspeed",
-	    "layer_get_vspeed",
-	    "layer_script_begin",
-	    "layer_script_end",
-	    "layer_shader",
+	    "layer_get_id",
+	    "layer_get_id_at_depth",
+	    "layer_get_name",
 	    "layer_get_script_begin",
 	    "layer_get_script_end",
 	    "layer_get_shader",
-	    "layer_set_target_room",
 	    "layer_get_target_room",
-	    "layer_reset_target_room",
-	    "layer_get_all",
-	    "layer_get_all_elements",
-	    "layer_get_name",
-	    "layer_depth",
-	    "layer_get_element_layer",
-	    "layer_get_element_type",
-	    "layer_element_move",
-	    "layer_force_draw_depth",
+	    "layer_get_visible",
+	    "layer_get_vspeed",
+	    "layer_get_x",
+	    "layer_get_y",
+	    "layer_has_instance",
+	    "layer_hspeed",
+	    "layer_instance_get_instance",
 	    "layer_is_draw_depth_forced",
-	    "layer_get_forced_depth",
-	    "layer_background_get_id",
-	    "layer_background_exists",
-	    "layer_background_create",
-	    "layer_background_destroy",
-	    "layer_background_visible",
-	    "layer_background_change",
-	    "layer_background_sprite",
-	    "layer_background_htiled",
-	    "layer_background_vtiled",
-	    "layer_background_stretch",
-	    "layer_background_yscale",
-	    "layer_background_xscale",
-	    "layer_background_blend",
-	    "layer_background_alpha",
-	    "layer_background_index",
-	    "layer_background_speed",
-	    "layer_background_get_visible",
-	    "layer_background_get_sprite",
-	    "layer_background_get_htiled",
-	    "layer_background_get_vtiled",
-	    "layer_background_get_stretch",
-	    "layer_background_get_yscale",
-	    "layer_background_get_xscale",
-	    "layer_background_get_blend",
-	    "layer_background_get_alpha",
-	    "layer_background_get_index",
-	    "layer_background_get_speed",
-	    "layer_sprite_get_id",
-	    "layer_sprite_exists",
-	    "layer_sprite_create",
-	    "layer_sprite_destroy",
-	    "layer_sprite_change",
-	    "layer_sprite_index",
-	    "layer_sprite_speed",
-	    "layer_sprite_xscale",
-	    "layer_sprite_yscale",
+	    "layer_reset_target_room",
+	    "layer_script_begin",
+	    "layer_script_end",
+	    "layer_sequence_angle",
+	    "layer_sequence_create",
+	    "layer_sequence_destroy",
+	    "layer_sequence_exists",
+	    "layer_sequence_get_angle",
+	    "layer_sequence_get_headdir",
+	    "layer_sequence_get_headpos",
+	    "layer_sequence_get_instance",
+	    "layer_sequence_get_length",
+	    "layer_sequence_get_sequence",
+	    "layer_sequence_get_speedscale",
+	    "layer_sequence_get_x",
+	    "layer_sequence_get_xscale",
+	    "layer_sequence_get_y",
+	    "layer_sequence_get_yscale",
+	    "layer_sequence_headdir",
+	    "layer_sequence_headpos",
+	    "layer_sequence_is_finished",
+	    "layer_sequence_is_paused",
+	    "layer_sequence_pause",
+	    "layer_sequence_play",
+	    "layer_sequence_speedscale",
+	    "layer_sequence_x",
+	    "layer_sequence_xscale",
+	    "layer_sequence_y",
+	    "layer_sequence_yscale",
+	    "layer_set_fx",
+	    "layer_set_target_room",
+	    "layer_set_visible",
+	    "layer_shader",
+	    "layer_sprite_alpha",
 	    "layer_sprite_angle",
 	    "layer_sprite_blend",
-	    "layer_sprite_alpha",
-	    "layer_sprite_x",
-	    "layer_sprite_y",
-	    "layer_sprite_get_sprite",
-	    "layer_sprite_get_index",
-	    "layer_sprite_get_speed",
-	    "layer_sprite_get_xscale",
-	    "layer_sprite_get_yscale",
+	    "layer_sprite_change",
+	    "layer_sprite_create",
+	    "layer_sprite_destroy",
+	    "layer_sprite_exists",
+	    "layer_sprite_get_alpha",
 	    "layer_sprite_get_angle",
 	    "layer_sprite_get_blend",
-	    "layer_sprite_get_alpha",
+	    "layer_sprite_get_id",
+	    "layer_sprite_get_index",
+	    "layer_sprite_get_speed",
+	    "layer_sprite_get_sprite",
 	    "layer_sprite_get_x",
+	    "layer_sprite_get_xscale",
 	    "layer_sprite_get_y",
-	    "layer_tilemap_get_id",
-	    "layer_tilemap_exists",
+	    "layer_sprite_get_yscale",
+	    "layer_sprite_index",
+	    "layer_sprite_speed",
+	    "layer_sprite_x",
+	    "layer_sprite_xscale",
+	    "layer_sprite_y",
+	    "layer_sprite_yscale",
+	    "layer_tile_alpha",
+	    "layer_tile_blend",
+	    "layer_tile_change",
+	    "layer_tile_create",
+	    "layer_tile_destroy",
+	    "layer_tile_exists",
+	    "layer_tile_get_alpha",
+	    "layer_tile_get_blend",
+	    "layer_tile_get_region",
+	    "layer_tile_get_sprite",
+	    "layer_tile_get_visible",
+	    "layer_tile_get_x",
+	    "layer_tile_get_xscale",
+	    "layer_tile_get_y",
+	    "layer_tile_get_yscale",
+	    "layer_tile_region",
+	    "layer_tile_visible",
+	    "layer_tile_x",
+	    "layer_tile_xscale",
+	    "layer_tile_y",
+	    "layer_tile_yscale",
 	    "layer_tilemap_create",
 	    "layer_tilemap_destroy",
-	    "tilemap_tileset",
-	    "tilemap_x",
-	    "tilemap_y",
-	    "tilemap_set",
-	    "tilemap_set_at_pixel",
-	    "tilemap_get_tileset",
-	    "tilemap_get_tile_width",
-	    "tilemap_get_tile_height",
-	    "tilemap_get_width",
-	    "tilemap_get_height",
-	    "tilemap_get_x",
-	    "tilemap_get_y",
+	    "layer_tilemap_exists",
+	    "layer_tilemap_get_id",
+	    "layer_vspeed",
+	    "layer_x",
+	    "layer_y",
+	    "lengthdir_x",
+	    "lengthdir_y",
+	    "lerp",
+	    "lin_to_db",
+	    "ln",
+	    "load_csv",
+	    "log10",
+	    "log2",
+	    "logn",
+	    "make_color_hsv",
+	    "make_color_rgb",
+	    "make_colour_hsv",
+	    "make_colour_rgb",
+	    "math_get_epsilon",
+	    "math_set_epsilon",
+	    "matrix_build",
+	    "matrix_build_identity",
+	    "matrix_build_lookat",
+	    "matrix_build_projection_ortho",
+	    "matrix_build_projection_perspective",
+	    "matrix_build_projection_perspective_fov",
+	    "matrix_get",
+	    "matrix_multiply",
+	    "matrix_set",
+	    "matrix_stack_clear",
+	    "matrix_stack_is_empty",
+	    "matrix_stack_pop",
+	    "matrix_stack_push",
+	    "matrix_stack_set",
+	    "matrix_stack_top",
+	    "matrix_transform_vertex",
+	    "max",
+	    "md5_file",
+	    "md5_string_unicode",
+	    "md5_string_utf8",
+	    "mean",
+	    "median",
+	    "merge_color",
+	    "merge_colour",
+	    "method",
+	    "method_call",
+	    "method_get_index",
+	    "method_get_self",
+	    "min",
+	    "motion_add",
+	    "motion_set",
+	    "mouse_check_button",
+	    "mouse_check_button_pressed",
+	    "mouse_check_button_released",
+	    "mouse_clear",
+	    "mouse_wheel_down",
+	    "mouse_wheel_up",
+	    "move_and_collide",
+	    "move_bounce_all",
+	    "move_bounce_solid",
+	    "move_contact_all",
+	    "move_contact_solid",
+	    "move_outside_all",
+	    "move_outside_solid",
+	    "move_random",
+	    "move_snap",
+	    "move_towards_point",
+	    "move_wrap",
+	    "mp_grid_add_cell",
+	    "mp_grid_add_instances",
+	    "mp_grid_add_rectangle",
+	    "mp_grid_clear_all",
+	    "mp_grid_clear_cell",
+	    "mp_grid_clear_rectangle",
+	    "mp_grid_create",
+	    "mp_grid_destroy",
+	    "mp_grid_draw",
+	    "mp_grid_get_cell",
+	    "mp_grid_path",
+	    "mp_grid_to_ds_grid",
+	    "mp_linear_path",
+	    "mp_linear_path_object",
+	    "mp_linear_step",
+	    "mp_linear_step_object",
+	    "mp_potential_path",
+	    "mp_potential_path_object",
+	    "mp_potential_settings",
+	    "mp_potential_step",
+	    "mp_potential_step_object",
+	    "nameof",
+	    "network_connect",
+	    "network_connect_async",
+	    "network_connect_raw",
+	    "network_connect_raw_async",
+	    "network_create_server",
+	    "network_create_server_raw",
+	    "network_create_socket",
+	    "network_create_socket_ext",
+	    "network_destroy",
+	    "network_resolve",
+	    "network_send_broadcast",
+	    "network_send_packet",
+	    "network_send_raw",
+	    "network_send_udp",
+	    "network_send_udp_raw",
+	    "network_set_config",
+	    "network_set_timeout",
+	    "object_exists",
+	    "object_get_mask",
+	    "object_get_name",
+	    "object_get_parent",
+	    "object_get_persistent",
+	    "object_get_physics",
+	    "object_get_solid",
+	    "object_get_sprite",
+	    "object_get_visible",
+	    "object_is_ancestor",
+	    "object_set_mask",
+	    "object_set_persistent",
+	    "object_set_solid",
+	    "object_set_sprite",
+	    "object_set_visible",
+	    "ord",
+	    "os_check_permission",
+	    "os_get_config",
+	    "os_get_info",
+	    "os_get_language",
+	    "os_get_region",
+	    "os_is_network_connected",
+	    "os_is_paused",
+	    "os_lock_orientation",
+	    "os_powersave_enable",
+	    "os_request_permission",
+	    "os_set_orientation_lock",
+	    "parameter_count",
+	    "parameter_string",
+	    "part_emitter_burst",
+	    "part_emitter_clear",
+	    "part_emitter_create",
+	    "part_emitter_delay",
+	    "part_emitter_destroy",
+	    "part_emitter_destroy_all",
+	    "part_emitter_enable",
+	    "part_emitter_exists",
+	    "part_emitter_interval",
+	    "part_emitter_region",
+	    "part_emitter_relative",
+	    "part_emitter_stream",
+	    "part_particles_burst",
+	    "part_particles_clear",
+	    "part_particles_count",
+	    "part_particles_create",
+	    "part_particles_create_color",
+	    "part_particles_create_colour",
+	    "part_system_angle",
+	    "part_system_automatic_draw",
+	    "part_system_automatic_update",
+	    "part_system_clear",
+	    "part_system_color",
+	    "part_system_colour",
+	    "part_system_create",
+	    "part_system_create_layer",
+	    "part_system_depth",
+	    "part_system_destroy",
+	    "part_system_draw_order",
+	    "part_system_drawit",
+	    "part_system_exists",
+	    "part_system_get_info",
+	    "part_system_get_layer",
+	    "part_system_global_space",
+	    "part_system_layer",
+	    "part_system_position",
+	    "part_system_update",
+	    "part_type_alpha1",
+	    "part_type_alpha2",
+	    "part_type_alpha3",
+	    "part_type_blend",
+	    "part_type_clear",
+	    "part_type_color1",
+	    "part_type_color2",
+	    "part_type_color3",
+	    "part_type_color_hsv",
+	    "part_type_color_mix",
+	    "part_type_color_rgb",
+	    "part_type_colour1",
+	    "part_type_colour2",
+	    "part_type_colour3",
+	    "part_type_colour_hsv",
+	    "part_type_colour_mix",
+	    "part_type_colour_rgb",
+	    "part_type_create",
+	    "part_type_death",
+	    "part_type_destroy",
+	    "part_type_direction",
+	    "part_type_exists",
+	    "part_type_gravity",
+	    "part_type_life",
+	    "part_type_orientation",
+	    "part_type_scale",
+	    "part_type_shape",
+	    "part_type_size",
+	    "part_type_size_x",
+	    "part_type_size_y",
+	    "part_type_speed",
+	    "part_type_sprite",
+	    "part_type_step",
+	    "part_type_subimage",
+	    "particle_exists",
+	    "particle_get_info",
+	    "path_add",
+	    "path_add_point",
+	    "path_append",
+	    "path_assign",
+	    "path_change_point",
+	    "path_clear_points",
+	    "path_delete",
+	    "path_delete_point",
+	    "path_duplicate",
+	    "path_end",
+	    "path_exists",
+	    "path_flip",
+	    "path_get_closed",
+	    "path_get_kind",
+	    "path_get_length",
+	    "path_get_name",
+	    "path_get_number",
+	    "path_get_point_speed",
+	    "path_get_point_x",
+	    "path_get_point_y",
+	    "path_get_precision",
+	    "path_get_speed",
+	    "path_get_x",
+	    "path_get_y",
+	    "path_insert_point",
+	    "path_mirror",
+	    "path_rescale",
+	    "path_reverse",
+	    "path_rotate",
+	    "path_set_closed",
+	    "path_set_kind",
+	    "path_set_precision",
+	    "path_shift",
+	    "path_start",
+	    "physics_apply_angular_impulse",
+	    "physics_apply_force",
+	    "physics_apply_impulse",
+	    "physics_apply_local_force",
+	    "physics_apply_local_impulse",
+	    "physics_apply_torque",
+	    "physics_draw_debug",
+	    "physics_fixture_add_point",
+	    "physics_fixture_bind",
+	    "physics_fixture_bind_ext",
+	    "physics_fixture_create",
+	    "physics_fixture_delete",
+	    "physics_fixture_set_angular_damping",
+	    "physics_fixture_set_awake",
+	    "physics_fixture_set_box_shape",
+	    "physics_fixture_set_chain_shape",
+	    "physics_fixture_set_circle_shape",
+	    "physics_fixture_set_collision_group",
+	    "physics_fixture_set_density",
+	    "physics_fixture_set_edge_shape",
+	    "physics_fixture_set_friction",
+	    "physics_fixture_set_kinematic",
+	    "physics_fixture_set_linear_damping",
+	    "physics_fixture_set_polygon_shape",
+	    "physics_fixture_set_restitution",
+	    "physics_fixture_set_sensor",
+	    "physics_get_density",
+	    "physics_get_friction",
+	    "physics_get_restitution",
+	    "physics_joint_delete",
+	    "physics_joint_distance_create",
+	    "physics_joint_enable_motor",
+	    "physics_joint_friction_create",
+	    "physics_joint_gear_create",
+	    "physics_joint_get_value",
+	    "physics_joint_prismatic_create",
+	    "physics_joint_pulley_create",
+	    "physics_joint_revolute_create",
+	    "physics_joint_rope_create",
+	    "physics_joint_set_value",
+	    "physics_joint_weld_create",
+	    "physics_joint_wheel_create",
+	    "physics_mass_properties",
+	    "physics_particle_count",
+	    "physics_particle_create",
+	    "physics_particle_delete",
+	    "physics_particle_delete_region_box",
+	    "physics_particle_delete_region_circle",
+	    "physics_particle_delete_region_poly",
+	    "physics_particle_draw",
+	    "physics_particle_draw_ext",
+	    "physics_particle_get_damping",
+	    "physics_particle_get_data",
+	    "physics_particle_get_data_particle",
+	    "physics_particle_get_density",
+	    "physics_particle_get_gravity_scale",
+	    "physics_particle_get_group_flags",
+	    "physics_particle_get_max_count",
+	    "physics_particle_get_radius",
+	    "physics_particle_group_add_point",
+	    "physics_particle_group_begin",
+	    "physics_particle_group_box",
+	    "physics_particle_group_circle",
+	    "physics_particle_group_count",
+	    "physics_particle_group_delete",
+	    "physics_particle_group_end",
+	    "physics_particle_group_get_ang_vel",
+	    "physics_particle_group_get_angle",
+	    "physics_particle_group_get_centre_x",
+	    "physics_particle_group_get_centre_y",
+	    "physics_particle_group_get_data",
+	    "physics_particle_group_get_inertia",
+	    "physics_particle_group_get_mass",
+	    "physics_particle_group_get_vel_x",
+	    "physics_particle_group_get_vel_y",
+	    "physics_particle_group_get_x",
+	    "physics_particle_group_get_y",
+	    "physics_particle_group_join",
+	    "physics_particle_group_polygon",
+	    "physics_particle_set_category_flags",
+	    "physics_particle_set_damping",
+	    "physics_particle_set_density",
+	    "physics_particle_set_flags",
+	    "physics_particle_set_gravity_scale",
+	    "physics_particle_set_group_flags",
+	    "physics_particle_set_max_count",
+	    "physics_particle_set_radius",
+	    "physics_pause_enable",
+	    "physics_remove_fixture",
+	    "physics_set_density",
+	    "physics_set_friction",
+	    "physics_set_restitution",
+	    "physics_test_overlap",
+	    "physics_world_create",
+	    "physics_world_draw_debug",
+	    "physics_world_gravity",
+	    "physics_world_update_iterations",
+	    "physics_world_update_speed",
+	    "place_empty",
+	    "place_free",
+	    "place_meeting",
+	    "place_snapped",
+	    "point_direction",
+	    "point_distance",
+	    "point_distance_3d",
+	    "point_in_circle",
+	    "point_in_rectangle",
+	    "point_in_triangle",
+	    "position_change",
+	    "position_destroy",
+	    "position_empty",
+	    "position_meeting",
+	    "power",
+	    "ptr",
+	    "radtodeg",
+	    "random",
+	    "random_get_seed",
+	    "random_range",
+	    "random_set_seed",
+	    "randomise",
+	    "randomize",
+	    "real",
+	    "rectangle_in_circle",
+	    "rectangle_in_rectangle",
+	    "rectangle_in_triangle",
+	    "ref_create",
+	    "rollback_chat",
+	    "rollback_create_game",
+	    "rollback_define_extra_network_latency",
+	    "rollback_define_input",
+	    "rollback_define_input_frame_delay",
+	    "rollback_define_mock_input",
+	    "rollback_define_player",
+	    "rollback_display_events",
+	    "rollback_get_info",
+	    "rollback_get_input",
+	    "rollback_get_player_prefs",
+	    "rollback_join_game",
+	    "rollback_leave_game",
+	    "rollback_set_player_prefs",
+	    "rollback_start_game",
+	    "rollback_sync_on_frame",
+	    "rollback_use_late_join",
+	    "rollback_use_manual_start",
+	    "rollback_use_player_prefs",
+	    "rollback_use_random_input",
+	    "room_add",
+	    "room_assign",
+	    "room_duplicate",
+	    "room_exists",
+	    "room_get_camera",
+	    "room_get_info",
+	    "room_get_name",
+	    "room_get_viewport",
+	    "room_goto",
+	    "room_goto_next",
+	    "room_goto_previous",
+	    "room_instance_add",
+	    "room_instance_clear",
+	    "room_next",
+	    "room_previous",
+	    "room_restart",
+	    "room_set_camera",
+	    "room_set_height",
+	    "room_set_persistent",
+	    "room_set_view_enabled",
+	    "room_set_viewport",
+	    "room_set_width",
+	    "round",
+	    "scheduler_resolution_get",
+	    "scheduler_resolution_set",
+	    "screen_save",
+	    "screen_save_part",
+	    "script_execute",
+	    "script_execute_ext",
+	    "script_exists",
+	    "script_get_name",
+	    "sequence_create",
+	    "sequence_destroy",
+	    "sequence_exists",
+	    "sequence_get",
+	    "sequence_get_objects",
+	    "sequence_instance_override_object",
+	    "sequence_keyframe_new",
+	    "sequence_keyframedata_new",
+	    "sequence_track_new",
+	    "sha1_file",
+	    "sha1_string_unicode",
+	    "sha1_string_utf8",
+	    "shader_current",
+	    "shader_enable_corner_id",
+	    "shader_get_name",
+	    "shader_get_sampler_index",
+	    "shader_get_uniform",
+	    "shader_is_compiled",
+	    "shader_reset",
+	    "shader_set",
+	    "shader_set_uniform_f",
+	    "shader_set_uniform_f_array",
+	    "shader_set_uniform_f_buffer",
+	    "shader_set_uniform_i",
+	    "shader_set_uniform_i_array",
+	    "shader_set_uniform_matrix",
+	    "shader_set_uniform_matrix_array",
+	    "shaders_are_supported",
+	    "shop_leave_rating",
+	    "show_debug_message",
+	    "show_debug_message_ext",
+	    "show_debug_overlay",
+	    "show_error",
+	    "show_message",
+	    "show_message_async",
+	    "show_question",
+	    "show_question_async",
+	    "sign",
+	    "sin",
+	    "skeleton_animation_clear",
+	    "skeleton_animation_get",
+	    "skeleton_animation_get_duration",
+	    "skeleton_animation_get_event_frames",
+	    "skeleton_animation_get_ext",
+	    "skeleton_animation_get_frame",
+	    "skeleton_animation_get_frames",
+	    "skeleton_animation_get_position",
+	    "skeleton_animation_is_finished",
+	    "skeleton_animation_is_looping",
+	    "skeleton_animation_list",
+	    "skeleton_animation_mix",
+	    "skeleton_animation_set",
+	    "skeleton_animation_set_ext",
+	    "skeleton_animation_set_frame",
+	    "skeleton_animation_set_position",
+	    "skeleton_attachment_create",
+	    "skeleton_attachment_create_color",
+	    "skeleton_attachment_create_colour",
+	    "skeleton_attachment_destroy",
+	    "skeleton_attachment_exists",
+	    "skeleton_attachment_get",
+	    "skeleton_attachment_replace",
+	    "skeleton_attachment_replace_color",
+	    "skeleton_attachment_replace_colour",
+	    "skeleton_attachment_set",
+	    "skeleton_bone_data_get",
+	    "skeleton_bone_data_set",
+	    "skeleton_bone_list",
+	    "skeleton_bone_state_get",
+	    "skeleton_bone_state_set",
+	    "skeleton_collision_draw_set",
+	    "skeleton_find_slot",
+	    "skeleton_get_bounds",
+	    "skeleton_get_minmax",
+	    "skeleton_get_num_bounds",
+	    "skeleton_skin_create",
+	    "skeleton_skin_get",
+	    "skeleton_skin_list",
+	    "skeleton_skin_set",
+	    "skeleton_slot_alpha_get",
+	    "skeleton_slot_color_get",
+	    "skeleton_slot_color_set",
+	    "skeleton_slot_colour_get",
+	    "skeleton_slot_colour_set",
+	    "skeleton_slot_data",
+	    "skeleton_slot_data_instance",
+	    "skeleton_slot_list",
+	    "sprite_add",
+	    "sprite_add_ext",
+	    "sprite_add_from_surface",
+	    "sprite_assign",
+	    "sprite_collision_mask",
+	    "sprite_create_from_surface",
+	    "sprite_delete",
+	    "sprite_duplicate",
+	    "sprite_exists",
+	    "sprite_flush",
+	    "sprite_flush_multi",
+	    "sprite_get_bbox_bottom",
+	    "sprite_get_bbox_left",
+	    "sprite_get_bbox_mode",
+	    "sprite_get_bbox_right",
+	    "sprite_get_bbox_top",
+	    "sprite_get_height",
+	    "sprite_get_info",
+	    "sprite_get_name",
+	    "sprite_get_nineslice",
+	    "sprite_get_number",
+	    "sprite_get_speed",
+	    "sprite_get_speed_type",
+	    "sprite_get_texture",
+	    "sprite_get_tpe",
+	    "sprite_get_uvs",
+	    "sprite_get_width",
+	    "sprite_get_xoffset",
+	    "sprite_get_yoffset",
+	    "sprite_merge",
+	    "sprite_nineslice_create",
+	    "sprite_prefetch",
+	    "sprite_prefetch_multi",
+	    "sprite_replace",
+	    "sprite_save",
+	    "sprite_save_strip",
+	    "sprite_set_alpha_from_sprite",
+	    "sprite_set_bbox",
+	    "sprite_set_bbox_mode",
+	    "sprite_set_cache_size",
+	    "sprite_set_cache_size_ext",
+	    "sprite_set_nineslice",
+	    "sprite_set_offset",
+	    "sprite_set_speed",
+	    "sqr",
+	    "sqrt",
+	    "static_get",
+	    "static_set",
+	    "string",
+	    "string_byte_at",
+	    "string_byte_length",
+	    "string_char_at",
+	    "string_concat",
+	    "string_concat_ext",
+	    "string_copy",
+	    "string_count",
+	    "string_delete",
+	    "string_digits",
+	    "string_ends_with",
+	    "string_ext",
+	    "string_foreach",
+	    "string_format",
+	    "string_hash_to_newline",
+	    "string_height",
+	    "string_height_ext",
+	    "string_insert",
+	    "string_join",
+	    "string_join_ext",
+	    "string_last_pos",
+	    "string_last_pos_ext",
+	    "string_length",
+	    "string_letters",
+	    "string_lettersdigits",
+	    "string_lower",
+	    "string_ord_at",
+	    "string_pos",
+	    "string_pos_ext",
+	    "string_repeat",
+	    "string_replace",
+	    "string_replace_all",
+	    "string_set_byte_at",
+	    "string_split",
+	    "string_split_ext",
+	    "string_starts_with",
+	    "string_trim",
+	    "string_trim_end",
+	    "string_trim_start",
+	    "string_upper",
+	    "string_width",
+	    "string_width_ext",
+	    "struct_exists",
+	    "struct_foreach",
+	    "struct_get",
+	    "struct_get_from_hash",
+	    "struct_get_names",
+	    "struct_names_count",
+	    "struct_remove",
+	    "struct_set",
+	    "struct_set_from_hash",
+	    "surface_copy",
+	    "surface_copy_part",
+	    "surface_create",
+	    "surface_create_ext",
+	    "surface_depth_disable",
+	    "surface_exists",
+	    "surface_format_is_supported",
+	    "surface_free",
+	    "surface_get_depth_disable",
+	    "surface_get_format",
+	    "surface_get_height",
+	    "surface_get_target",
+	    "surface_get_target_ext",
+	    "surface_get_texture",
+	    "surface_get_width",
+	    "surface_getpixel",
+	    "surface_getpixel_ext",
+	    "surface_reset_target",
+	    "surface_resize",
+	    "surface_save",
+	    "surface_save_part",
+	    "surface_set_target",
+	    "surface_set_target_ext",
+	    "tag_get_asset_ids",
+	    "tag_get_assets",
+	    "tan",
+	    "texture_debug_messages",
+	    "texture_flush",
+	    "texture_get_height",
+	    "texture_get_texel_height",
+	    "texture_get_texel_width",
+	    "texture_get_uvs",
+	    "texture_get_width",
+	    "texture_global_scale",
+	    "texture_is_ready",
+	    "texture_prefetch",
+	    "texture_set_stage",
+	    "texturegroup_get_fonts",
+	    "texturegroup_get_names",
+	    "texturegroup_get_sprites",
+	    "texturegroup_get_status",
+	    "texturegroup_get_textures",
+	    "texturegroup_get_tilesets",
+	    "texturegroup_load",
+	    "texturegroup_set_mode",
+	    "texturegroup_unload",
+	    "tile_get_empty",
+	    "tile_get_flip",
+	    "tile_get_index",
+	    "tile_get_mirror",
+	    "tile_get_rotate",
+	    "tile_set_empty",
+	    "tile_set_flip",
+	    "tile_set_index",
+	    "tile_set_mirror",
+	    "tile_set_rotate",
+	    "tilemap_clear",
 	    "tilemap_get",
 	    "tilemap_get_at_pixel",
 	    "tilemap_get_cell_x_at_pixel",
 	    "tilemap_get_cell_y_at_pixel",
-	    "tilemap_clear",
-	    "draw_tilemap",
-	    "draw_tile",
-	    "tilemap_set_global_mask",
-	    "tilemap_get_global_mask",
-	    "tilemap_set_mask",
-	    "tilemap_get_mask",
 	    "tilemap_get_frame",
-	    "tile_set_empty",
-	    "tile_set_index",
-	    "tile_set_flip",
-	    "tile_set_mirror",
-	    "tile_set_rotate",
-	    "tile_get_empty",
-	    "tile_get_index",
-	    "tile_get_flip",
-	    "tile_get_mirror",
-	    "tile_get_rotate",
-	    "layer_tile_exists",
-	    "layer_tile_create",
-	    "layer_tile_destroy",
-	    "layer_tile_change",
-	    "layer_tile_xscale",
-	    "layer_tile_yscale",
-	    "layer_tile_blend",
-	    "layer_tile_alpha",
-	    "layer_tile_x",
-	    "layer_tile_y",
-	    "layer_tile_region",
-	    "layer_tile_visible",
-	    "layer_tile_get_sprite",
-	    "layer_tile_get_xscale",
-	    "layer_tile_get_yscale",
-	    "layer_tile_get_blend",
-	    "layer_tile_get_alpha",
-	    "layer_tile_get_x",
-	    "layer_tile_get_y",
-	    "layer_tile_get_region",
-	    "layer_tile_get_visible",
-	    "layer_instance_get_instance",
-	    "instance_activate_layer",
-	    "instance_deactivate_layer",
-	    "camera_create",
-	    "camera_create_view",
-	    "camera_destroy",
-	    "camera_apply",
-	    "camera_get_active",
-	    "camera_get_default",
-	    "camera_set_default",
-	    "camera_set_view_mat",
-	    "camera_set_proj_mat",
-	    "camera_set_update_script",
-	    "camera_set_begin_script",
-	    "camera_set_end_script",
-	    "camera_set_view_pos",
-	    "camera_set_view_size",
-	    "camera_set_view_speed",
-	    "camera_set_view_border",
-	    "camera_set_view_angle",
-	    "camera_set_view_target",
-	    "camera_get_view_mat",
-	    "camera_get_proj_mat",
-	    "camera_get_update_script",
-	    "camera_get_begin_script",
-	    "camera_get_end_script",
-	    "camera_get_view_x",
-	    "camera_get_view_y",
-	    "camera_get_view_width",
-	    "camera_get_view_height",
-	    "camera_get_view_speed_x",
-	    "camera_get_view_speed_y",
-	    "camera_get_view_border_x",
-	    "camera_get_view_border_y",
-	    "camera_get_view_angle",
-	    "camera_get_view_target",
+	    "tilemap_get_global_mask",
+	    "tilemap_get_height",
+	    "tilemap_get_mask",
+	    "tilemap_get_tile_height",
+	    "tilemap_get_tile_width",
+	    "tilemap_get_tileset",
+	    "tilemap_get_width",
+	    "tilemap_get_x",
+	    "tilemap_get_y",
+	    "tilemap_set",
+	    "tilemap_set_at_pixel",
+	    "tilemap_set_global_mask",
+	    "tilemap_set_height",
+	    "tilemap_set_mask",
+	    "tilemap_set_width",
+	    "tilemap_tileset",
+	    "tilemap_x",
+	    "tilemap_y",
+	    "tileset_get_info",
+	    "tileset_get_name",
+	    "tileset_get_texture",
+	    "tileset_get_uvs",
+	    "time_bpm_to_seconds",
+	    "time_seconds_to_bpm",
+	    "time_source_create",
+	    "time_source_destroy",
+	    "time_source_exists",
+	    "time_source_get_children",
+	    "time_source_get_parent",
+	    "time_source_get_period",
+	    "time_source_get_reps_completed",
+	    "time_source_get_reps_remaining",
+	    "time_source_get_state",
+	    "time_source_get_time_remaining",
+	    "time_source_get_units",
+	    "time_source_pause",
+	    "time_source_reconfigure",
+	    "time_source_reset",
+	    "time_source_resume",
+	    "time_source_start",
+	    "time_source_stop",
+	    "timeline_add",
+	    "timeline_clear",
+	    "timeline_delete",
+	    "timeline_exists",
+	    "timeline_get_name",
+	    "timeline_max_moment",
+	    "timeline_moment_add_script",
+	    "timeline_moment_clear",
+	    "timeline_size",
+	    "typeof",
+	    "url_get_domain",
+	    "url_open",
+	    "url_open_ext",
+	    "url_open_full",
+	    "uwp_device_touchscreen_available",
+	    "uwp_livetile_badge_clear",
+	    "uwp_livetile_badge_notification",
+	    "uwp_livetile_notification_begin",
+	    "uwp_livetile_notification_end",
+	    "uwp_livetile_notification_expiry",
+	    "uwp_livetile_notification_image_add",
+	    "uwp_livetile_notification_secondary_begin",
+	    "uwp_livetile_notification_tag",
+	    "uwp_livetile_notification_template_add",
+	    "uwp_livetile_notification_text_add",
+	    "uwp_livetile_queue_enable",
+	    "uwp_livetile_tile_clear",
+	    "uwp_secondarytile_badge_clear",
+	    "uwp_secondarytile_badge_notification",
+	    "uwp_secondarytile_delete",
+	    "uwp_secondarytile_pin",
+	    "uwp_secondarytile_tile_clear",
+	    "variable_clone",
+	    "variable_get_hash",
+	    "variable_global_exists",
+	    "variable_global_get",
+	    "variable_global_set",
+	    "variable_instance_exists",
+	    "variable_instance_get",
+	    "variable_instance_get_names",
+	    "variable_instance_names_count",
+	    "variable_instance_set",
+	    "variable_struct_exists",
+	    "variable_struct_get",
+	    "variable_struct_get_names",
+	    "variable_struct_names_count",
+	    "variable_struct_remove",
+	    "variable_struct_set",
+	    "vertex_argb",
+	    "vertex_begin",
+	    "vertex_color",
+	    "vertex_colour",
+	    "vertex_create_buffer",
+	    "vertex_create_buffer_ext",
+	    "vertex_create_buffer_from_buffer",
+	    "vertex_create_buffer_from_buffer_ext",
+	    "vertex_delete_buffer",
+	    "vertex_end",
+	    "vertex_float1",
+	    "vertex_float2",
+	    "vertex_float3",
+	    "vertex_float4",
+	    "vertex_format_add_color",
+	    "vertex_format_add_colour",
+	    "vertex_format_add_custom",
+	    "vertex_format_add_normal",
+	    "vertex_format_add_position",
+	    "vertex_format_add_position_3d",
+	    "vertex_format_add_texcoord",
+	    "vertex_format_begin",
+	    "vertex_format_delete",
+	    "vertex_format_end",
+	    "vertex_format_get_info",
+	    "vertex_freeze",
+	    "vertex_get_buffer_size",
+	    "vertex_get_number",
+	    "vertex_normal",
+	    "vertex_position",
+	    "vertex_position_3d",
+	    "vertex_submit",
+	    "vertex_submit_ext",
+	    "vertex_texcoord",
+	    "vertex_ubyte4",
+	    "vertex_update_buffer_from_buffer",
+	    "vertex_update_buffer_from_vertex",
+	    "video_close",
+	    "video_draw",
+	    "video_enable_loop",
+	    "video_get_duration",
+	    "video_get_format",
+	    "video_get_position",
+	    "video_get_status",
+	    "video_get_volume",
+	    "video_is_looping",
+	    "video_open",
+	    "video_pause",
+	    "video_resume",
+	    "video_seek_to",
+	    "video_set_volume",
 	    "view_get_camera",
-	    "view_get_visible",
-	    "view_get_xport",
-	    "view_get_yport",
-	    "view_get_wport",
 	    "view_get_hport",
 	    "view_get_surface_id",
+	    "view_get_visible",
+	    "view_get_wport",
+	    "view_get_xport",
+	    "view_get_yport",
 	    "view_set_camera",
-	    "view_set_visible",
-	    "view_set_xport",
-	    "view_set_yport",
-	    "view_set_wport",
 	    "view_set_hport",
 	    "view_set_surface_id",
-	    "gesture_drag_time",
-	    "gesture_drag_distance",
-	    "gesture_flick_speed",
-	    "gesture_double_tap_time",
-	    "gesture_double_tap_distance",
-	    "gesture_pinch_distance",
-	    "gesture_pinch_angle_towards",
-	    "gesture_pinch_angle_away",
-	    "gesture_rotate_time",
-	    "gesture_rotate_angle",
-	    "gesture_tap_count",
-	    "gesture_get_drag_time",
-	    "gesture_get_drag_distance",
-	    "gesture_get_flick_speed",
-	    "gesture_get_double_tap_time",
-	    "gesture_get_double_tap_distance",
-	    "gesture_get_pinch_distance",
-	    "gesture_get_pinch_angle_towards",
-	    "gesture_get_pinch_angle_away",
-	    "gesture_get_rotate_time",
-	    "gesture_get_rotate_angle",
-	    "gesture_get_tap_count",
-	    "keyboard_virtual_show",
-	    "keyboard_virtual_hide",
-	    "keyboard_virtual_status",
-	    "keyboard_virtual_height"
+	    "view_set_visible",
+	    "view_set_wport",
+	    "view_set_xport",
+	    "view_set_yport",
+	    "virtual_key_add",
+	    "virtual_key_delete",
+	    "virtual_key_hide",
+	    "virtual_key_show",
+	    "wallpaper_set_config",
+	    "wallpaper_set_subscriptions",
+	    "weak_ref_alive",
+	    "weak_ref_any_alive",
+	    "weak_ref_create",
+	    "window_center",
+	    "window_device",
+	    "window_enable_borderless_fullscreen",
+	    "window_get_borderless_fullscreen",
+	    "window_get_caption",
+	    "window_get_color",
+	    "window_get_colour",
+	    "window_get_cursor",
+	    "window_get_fullscreen",
+	    "window_get_height",
+	    "window_get_showborder",
+	    "window_get_visible_rects",
+	    "window_get_width",
+	    "window_get_x",
+	    "window_get_y",
+	    "window_handle",
+	    "window_has_focus",
+	    "window_mouse_get_delta_x",
+	    "window_mouse_get_delta_y",
+	    "window_mouse_get_locked",
+	    "window_mouse_get_x",
+	    "window_mouse_get_y",
+	    "window_mouse_set",
+	    "window_mouse_set_locked",
+	    "window_set_caption",
+	    "window_set_color",
+	    "window_set_colour",
+	    "window_set_cursor",
+	    "window_set_fullscreen",
+	    "window_set_max_height",
+	    "window_set_max_width",
+	    "window_set_min_height",
+	    "window_set_min_width",
+	    "window_set_position",
+	    "window_set_rectangle",
+	    "window_set_showborder",
+	    "window_set_size",
+	    "window_view_mouse_get_x",
+	    "window_view_mouse_get_y",
+	    "window_views_mouse_get_x",
+	    "window_views_mouse_get_y",
+	    "winphone_tile_background_color",
+	    "winphone_tile_background_colour",
+	    "zip_add_file",
+	    "zip_create",
+	    "zip_save",
+	    "zip_unzip",
+	    "zip_unzip_async"
 	  ];
-	  const LITERALS = [
-	    "true",
-	    "false",
-	    "all",
-	    "noone",
-	    "undefined",
-	    "pointer_invalid",
-	    "pointer_null"
-	  ];
-	  // many of these look like enumerables to me (see comments below)
 	  const SYMBOLS = [
-	    "other",
-	    "global",
-	    "local",
-	    "path_action_stop",
-	    "path_action_restart",
-	    "path_action_continue",
-	    "path_action_reverse",
-	    "pi",
+	    "AudioEffect",
+	    "AudioEffectType",
+	    "AudioLFOType",
 	    "GM_build_date",
-	    "GM_version",
+	    "GM_build_type",
+	    "GM_is_sandboxed",
+	    "GM_project_filename",
 	    "GM_runtime_version",
-	    "timezone_local",
-	    "timezone_utc",
-	    "gamespeed_fps",
-	    "gamespeed_microseconds",
-	    // for example ev_ are types of events
+	    "GM_version",
+	    "NaN",
+	    "_GMFILE_",
+	    "_GMFUNCTION_",
+	    "_GMLINE_",
+	    "alignmentH",
+	    "alignmentV",
+	    "all",
+	    "animcurvetype_bezier",
+	    "animcurvetype_catmullrom",
+	    "animcurvetype_linear",
+	    "asset_animationcurve",
+	    "asset_font",
+	    "asset_object",
+	    "asset_path",
+	    "asset_room",
+	    "asset_script",
+	    "asset_sequence",
+	    "asset_shader",
+	    "asset_sound",
+	    "asset_sprite",
+	    "asset_tiles",
+	    "asset_timeline",
+	    "asset_unknown",
+	    "audio_3D",
+	    "audio_bus_main",
+	    "audio_falloff_exponent_distance",
+	    "audio_falloff_exponent_distance_clamped",
+	    "audio_falloff_exponent_distance_scaled",
+	    "audio_falloff_inverse_distance",
+	    "audio_falloff_inverse_distance_clamped",
+	    "audio_falloff_inverse_distance_scaled",
+	    "audio_falloff_linear_distance",
+	    "audio_falloff_linear_distance_clamped",
+	    "audio_falloff_none",
+	    "audio_mono",
+	    "audio_stereo",
+	    "bboxkind_diamond",
+	    "bboxkind_ellipse",
+	    "bboxkind_precise",
+	    "bboxkind_rectangular",
+	    "bboxmode_automatic",
+	    "bboxmode_fullimage",
+	    "bboxmode_manual",
+	    "bm_add",
+	    "bm_dest_alpha",
+	    "bm_dest_color",
+	    "bm_dest_colour",
+	    "bm_inv_dest_alpha",
+	    "bm_inv_dest_color",
+	    "bm_inv_dest_colour",
+	    "bm_inv_src_alpha",
+	    "bm_inv_src_color",
+	    "bm_inv_src_colour",
+	    "bm_max",
+	    "bm_normal",
+	    "bm_one",
+	    "bm_src_alpha",
+	    "bm_src_alpha_sat",
+	    "bm_src_color",
+	    "bm_src_colour",
+	    "bm_subtract",
+	    "bm_zero",
+	    "browser_chrome",
+	    "browser_edge",
+	    "browser_firefox",
+	    "browser_ie",
+	    "browser_ie_mobile",
+	    "browser_not_a_browser",
+	    "browser_opera",
+	    "browser_safari",
+	    "browser_safari_mobile",
+	    "browser_tizen",
+	    "browser_unknown",
+	    "browser_windows_store",
+	    "buffer_bool",
+	    "buffer_f16",
+	    "buffer_f32",
+	    "buffer_f64",
+	    "buffer_fast",
+	    "buffer_fixed",
+	    "buffer_grow",
+	    "buffer_s16",
+	    "buffer_s32",
+	    "buffer_s8",
+	    "buffer_seek_end",
+	    "buffer_seek_relative",
+	    "buffer_seek_start",
+	    "buffer_string",
+	    "buffer_text",
+	    "buffer_u16",
+	    "buffer_u32",
+	    "buffer_u64",
+	    "buffer_u8",
+	    "buffer_vbuffer",
+	    "buffer_wrap",
+	    "c_aqua",
+	    "c_black",
+	    "c_blue",
+	    "c_dkgray",
+	    "c_dkgrey",
+	    "c_fuchsia",
+	    "c_gray",
+	    "c_green",
+	    "c_grey",
+	    "c_lime",
+	    "c_ltgray",
+	    "c_ltgrey",
+	    "c_maroon",
+	    "c_navy",
+	    "c_olive",
+	    "c_orange",
+	    "c_purple",
+	    "c_red",
+	    "c_silver",
+	    "c_teal",
+	    "c_white",
+	    "c_yellow",
+	    "cache_directory",
+	    "characterSpacing",
+	    "cmpfunc_always",
+	    "cmpfunc_equal",
+	    "cmpfunc_greater",
+	    "cmpfunc_greaterequal",
+	    "cmpfunc_less",
+	    "cmpfunc_lessequal",
+	    "cmpfunc_never",
+	    "cmpfunc_notequal",
+	    "coreColor",
+	    "coreColour",
+	    "cr_appstart",
+	    "cr_arrow",
+	    "cr_beam",
+	    "cr_cross",
+	    "cr_default",
+	    "cr_drag",
+	    "cr_handpoint",
+	    "cr_hourglass",
+	    "cr_none",
+	    "cr_size_all",
+	    "cr_size_nesw",
+	    "cr_size_ns",
+	    "cr_size_nwse",
+	    "cr_size_we",
+	    "cr_uparrow",
+	    "cull_clockwise",
+	    "cull_counterclockwise",
+	    "cull_noculling",
+	    "device_emulator",
+	    "device_ios_ipad",
+	    "device_ios_ipad_retina",
+	    "device_ios_iphone",
+	    "device_ios_iphone5",
+	    "device_ios_iphone6",
+	    "device_ios_iphone6plus",
+	    "device_ios_iphone_retina",
+	    "device_ios_unknown",
+	    "device_tablet",
+	    "display_landscape",
+	    "display_landscape_flipped",
+	    "display_portrait",
+	    "display_portrait_flipped",
+	    "dll_cdecl",
+	    "dll_stdcall",
+	    "dropShadowEnabled",
+	    "dropShadowEnabled",
+	    "ds_type_grid",
+	    "ds_type_list",
+	    "ds_type_map",
+	    "ds_type_priority",
+	    "ds_type_queue",
+	    "ds_type_stack",
+	    "ef_cloud",
+	    "ef_ellipse",
+	    "ef_explosion",
+	    "ef_firework",
+	    "ef_flare",
+	    "ef_rain",
+	    "ef_ring",
+	    "ef_smoke",
+	    "ef_smokeup",
+	    "ef_snow",
+	    "ef_spark",
+	    "ef_star",
+	    "effectsEnabled",
+	    "effectsEnabled",
+	    "ev_alarm",
+	    "ev_animation_end",
+	    "ev_animation_event",
+	    "ev_animation_update",
+	    "ev_async_audio_playback",
+	    "ev_async_audio_playback_ended",
+	    "ev_async_audio_recording",
+	    "ev_async_dialog",
+	    "ev_async_push_notification",
+	    "ev_async_save_load",
+	    "ev_async_save_load",
+	    "ev_async_social",
+	    "ev_async_system_event",
+	    "ev_async_web",
+	    "ev_async_web_cloud",
+	    "ev_async_web_iap",
+	    "ev_async_web_image_load",
+	    "ev_async_web_networking",
+	    "ev_async_web_steam",
+	    "ev_audio_playback",
+	    "ev_audio_playback_ended",
+	    "ev_audio_recording",
+	    "ev_boundary",
+	    "ev_boundary_view0",
+	    "ev_boundary_view1",
+	    "ev_boundary_view2",
+	    "ev_boundary_view3",
+	    "ev_boundary_view4",
+	    "ev_boundary_view5",
+	    "ev_boundary_view6",
+	    "ev_boundary_view7",
+	    "ev_broadcast_message",
+	    "ev_cleanup",
+	    "ev_collision",
 	    "ev_create",
 	    "ev_destroy",
-	    "ev_step",
-	    "ev_alarm",
-	    "ev_keyboard",
-	    "ev_mouse",
-	    "ev_collision",
-	    "ev_other",
+	    "ev_dialog_async",
 	    "ev_draw",
 	    "ev_draw_begin",
 	    "ev_draw_end",
-	    "ev_draw_pre",
+	    "ev_draw_normal",
 	    "ev_draw_post",
-	    "ev_keypress",
-	    "ev_keyrelease",
-	    "ev_trigger",
-	    "ev_left_button",
-	    "ev_right_button",
-	    "ev_middle_button",
-	    "ev_no_button",
-	    "ev_left_press",
-	    "ev_right_press",
-	    "ev_middle_press",
-	    "ev_left_release",
-	    "ev_right_release",
-	    "ev_middle_release",
-	    "ev_mouse_enter",
-	    "ev_mouse_leave",
-	    "ev_mouse_wheel_up",
-	    "ev_mouse_wheel_down",
+	    "ev_draw_pre",
+	    "ev_end_of_path",
+	    "ev_game_end",
+	    "ev_game_start",
+	    "ev_gesture",
+	    "ev_gesture_double_tap",
+	    "ev_gesture_drag_end",
+	    "ev_gesture_drag_start",
+	    "ev_gesture_dragging",
+	    "ev_gesture_flick",
+	    "ev_gesture_pinch_end",
+	    "ev_gesture_pinch_in",
+	    "ev_gesture_pinch_out",
+	    "ev_gesture_pinch_start",
+	    "ev_gesture_rotate_end",
+	    "ev_gesture_rotate_start",
+	    "ev_gesture_rotating",
+	    "ev_gesture_tap",
+	    "ev_global_gesture_double_tap",
+	    "ev_global_gesture_drag_end",
+	    "ev_global_gesture_drag_start",
+	    "ev_global_gesture_dragging",
+	    "ev_global_gesture_flick",
+	    "ev_global_gesture_pinch_end",
+	    "ev_global_gesture_pinch_in",
+	    "ev_global_gesture_pinch_out",
+	    "ev_global_gesture_pinch_start",
+	    "ev_global_gesture_rotate_end",
+	    "ev_global_gesture_rotate_start",
+	    "ev_global_gesture_rotating",
+	    "ev_global_gesture_tap",
 	    "ev_global_left_button",
-	    "ev_global_right_button",
-	    "ev_global_middle_button",
 	    "ev_global_left_press",
-	    "ev_global_right_press",
-	    "ev_global_middle_press",
 	    "ev_global_left_release",
-	    "ev_global_right_release",
+	    "ev_global_middle_button",
+	    "ev_global_middle_press",
 	    "ev_global_middle_release",
-	    "ev_joystick1_left",
-	    "ev_joystick1_right",
-	    "ev_joystick1_up",
-	    "ev_joystick1_down",
+	    "ev_global_right_button",
+	    "ev_global_right_press",
+	    "ev_global_right_release",
+	    "ev_gui",
+	    "ev_gui_begin",
+	    "ev_gui_end",
 	    "ev_joystick1_button1",
 	    "ev_joystick1_button2",
 	    "ev_joystick1_button3",
@@ -19801,10 +20643,10 @@ function requireGml () {
 	    "ev_joystick1_button6",
 	    "ev_joystick1_button7",
 	    "ev_joystick1_button8",
-	    "ev_joystick2_left",
-	    "ev_joystick2_right",
-	    "ev_joystick2_up",
-	    "ev_joystick2_down",
+	    "ev_joystick1_down",
+	    "ev_joystick1_left",
+	    "ev_joystick1_right",
+	    "ev_joystick1_up",
 	    "ev_joystick2_button1",
 	    "ev_joystick2_button2",
 	    "ev_joystick2_button3",
@@ -19813,19 +20655,59 @@ function requireGml () {
 	    "ev_joystick2_button6",
 	    "ev_joystick2_button7",
 	    "ev_joystick2_button8",
-	    "ev_outside",
-	    "ev_boundary",
-	    "ev_game_start",
-	    "ev_game_end",
-	    "ev_room_start",
-	    "ev_room_end",
-	    "ev_no_more_lives",
-	    "ev_animation_end",
-	    "ev_end_of_path",
+	    "ev_joystick2_down",
+	    "ev_joystick2_left",
+	    "ev_joystick2_right",
+	    "ev_joystick2_up",
+	    "ev_keyboard",
+	    "ev_keypress",
+	    "ev_keyrelease",
+	    "ev_left_button",
+	    "ev_left_press",
+	    "ev_left_release",
+	    "ev_middle_button",
+	    "ev_middle_press",
+	    "ev_middle_release",
+	    "ev_mouse",
+	    "ev_mouse_enter",
+	    "ev_mouse_leave",
+	    "ev_mouse_wheel_down",
+	    "ev_mouse_wheel_up",
+	    "ev_no_button",
 	    "ev_no_more_health",
-	    "ev_close_button",
+	    "ev_no_more_lives",
+	    "ev_other",
+	    "ev_outside",
+	    "ev_outside_view0",
+	    "ev_outside_view1",
+	    "ev_outside_view2",
+	    "ev_outside_view3",
+	    "ev_outside_view4",
+	    "ev_outside_view5",
+	    "ev_outside_view6",
+	    "ev_outside_view7",
+	    "ev_pre_create",
+	    "ev_push_notification",
+	    "ev_right_button",
+	    "ev_right_press",
+	    "ev_right_release",
+	    "ev_room_end",
+	    "ev_room_start",
+	    "ev_social",
+	    "ev_step",
+	    "ev_step_begin",
+	    "ev_step_end",
+	    "ev_step_normal",
+	    "ev_system_event",
+	    "ev_trigger",
 	    "ev_user0",
 	    "ev_user1",
+	    "ev_user10",
+	    "ev_user11",
+	    "ev_user12",
+	    "ev_user13",
+	    "ev_user14",
+	    "ev_user15",
 	    "ev_user2",
 	    "ev_user3",
 	    "ev_user4",
@@ -19834,70 +20716,448 @@ function requireGml () {
 	    "ev_user7",
 	    "ev_user8",
 	    "ev_user9",
-	    "ev_user10",
-	    "ev_user11",
-	    "ev_user12",
-	    "ev_user13",
-	    "ev_user14",
-	    "ev_user15",
-	    "ev_step_normal",
-	    "ev_step_begin",
-	    "ev_step_end",
-	    "ev_gui",
-	    "ev_gui_begin",
-	    "ev_gui_end",
-	    "ev_cleanup",
-	    "ev_gesture",
-	    "ev_gesture_tap",
-	    "ev_gesture_double_tap",
-	    "ev_gesture_drag_start",
-	    "ev_gesture_dragging",
-	    "ev_gesture_drag_end",
-	    "ev_gesture_flick",
-	    "ev_gesture_pinch_start",
-	    "ev_gesture_pinch_in",
-	    "ev_gesture_pinch_out",
-	    "ev_gesture_pinch_end",
-	    "ev_gesture_rotate_start",
-	    "ev_gesture_rotating",
-	    "ev_gesture_rotate_end",
-	    "ev_global_gesture_tap",
-	    "ev_global_gesture_double_tap",
-	    "ev_global_gesture_drag_start",
-	    "ev_global_gesture_dragging",
-	    "ev_global_gesture_drag_end",
-	    "ev_global_gesture_flick",
-	    "ev_global_gesture_pinch_start",
-	    "ev_global_gesture_pinch_in",
-	    "ev_global_gesture_pinch_out",
-	    "ev_global_gesture_pinch_end",
-	    "ev_global_gesture_rotate_start",
-	    "ev_global_gesture_rotating",
-	    "ev_global_gesture_rotate_end",
-	    "vk_nokey",
-	    "vk_anykey",
-	    "vk_enter",
-	    "vk_return",
-	    "vk_shift",
-	    "vk_control",
+	    "ev_web_async",
+	    "ev_web_cloud",
+	    "ev_web_iap",
+	    "ev_web_image_load",
+	    "ev_web_networking",
+	    "ev_web_sound_load",
+	    "ev_web_steam",
+	    "fa_archive",
+	    "fa_bottom",
+	    "fa_center",
+	    "fa_directory",
+	    "fa_hidden",
+	    "fa_left",
+	    "fa_middle",
+	    "fa_none",
+	    "fa_readonly",
+	    "fa_right",
+	    "fa_sysfile",
+	    "fa_top",
+	    "fa_volumeid",
+	    "false",
+	    "frameSizeX",
+	    "frameSizeY",
+	    "gamespeed_fps",
+	    "gamespeed_microseconds",
+	    "global",
+	    "glowColor",
+	    "glowColour",
+	    "glowEnabled",
+	    "glowEnabled",
+	    "glowEnd",
+	    "glowStart",
+	    "gp_axis_acceleration_x",
+	    "gp_axis_acceleration_y",
+	    "gp_axis_acceleration_z",
+	    "gp_axis_angular_velocity_x",
+	    "gp_axis_angular_velocity_y",
+	    "gp_axis_angular_velocity_z",
+	    "gp_axis_orientation_w",
+	    "gp_axis_orientation_x",
+	    "gp_axis_orientation_y",
+	    "gp_axis_orientation_z",
+	    "gp_axislh",
+	    "gp_axislv",
+	    "gp_axisrh",
+	    "gp_axisrv",
+	    "gp_face1",
+	    "gp_face2",
+	    "gp_face3",
+	    "gp_face4",
+	    "gp_padd",
+	    "gp_padl",
+	    "gp_padr",
+	    "gp_padu",
+	    "gp_select",
+	    "gp_shoulderl",
+	    "gp_shoulderlb",
+	    "gp_shoulderr",
+	    "gp_shoulderrb",
+	    "gp_start",
+	    "gp_stickl",
+	    "gp_stickr",
+	    "iap_available",
+	    "iap_canceled",
+	    "iap_ev_consume",
+	    "iap_ev_product",
+	    "iap_ev_purchase",
+	    "iap_ev_restore",
+	    "iap_ev_storeload",
+	    "iap_failed",
+	    "iap_purchased",
+	    "iap_refunded",
+	    "iap_status_available",
+	    "iap_status_loading",
+	    "iap_status_processing",
+	    "iap_status_restoring",
+	    "iap_status_unavailable",
+	    "iap_status_uninitialised",
+	    "iap_storeload_failed",
+	    "iap_storeload_ok",
+	    "iap_unavailable",
+	    "infinity",
+	    "kbv_autocapitalize_characters",
+	    "kbv_autocapitalize_none",
+	    "kbv_autocapitalize_sentences",
+	    "kbv_autocapitalize_words",
+	    "kbv_returnkey_continue",
+	    "kbv_returnkey_default",
+	    "kbv_returnkey_done",
+	    "kbv_returnkey_emergency",
+	    "kbv_returnkey_go",
+	    "kbv_returnkey_google",
+	    "kbv_returnkey_join",
+	    "kbv_returnkey_next",
+	    "kbv_returnkey_route",
+	    "kbv_returnkey_search",
+	    "kbv_returnkey_send",
+	    "kbv_returnkey_yahoo",
+	    "kbv_type_ascii",
+	    "kbv_type_default",
+	    "kbv_type_email",
+	    "kbv_type_numbers",
+	    "kbv_type_phone",
+	    "kbv_type_phone_name",
+	    "kbv_type_url",
+	    "layerelementtype_background",
+	    "layerelementtype_instance",
+	    "layerelementtype_oldtilemap",
+	    "layerelementtype_particlesystem",
+	    "layerelementtype_sequence",
+	    "layerelementtype_sprite",
+	    "layerelementtype_tile",
+	    "layerelementtype_tilemap",
+	    "layerelementtype_undefined",
+	    "leaderboard_type_number",
+	    "leaderboard_type_time_mins_secs",
+	    "lighttype_dir",
+	    "lighttype_point",
+	    "lineSpacing",
+	    "m_axisx",
+	    "m_axisx_gui",
+	    "m_axisy",
+	    "m_axisy_gui",
+	    "m_scroll_down",
+	    "m_scroll_up",
+	    "matrix_projection",
+	    "matrix_view",
+	    "matrix_world",
+	    "mb_any",
+	    "mb_left",
+	    "mb_middle",
+	    "mb_none",
+	    "mb_right",
+	    "mb_side1",
+	    "mb_side2",
+	    "mip_markedonly",
+	    "mip_off",
+	    "mip_on",
+	    "network_config_avoid_time_wait",
+	    "network_config_connect_timeout",
+	    "network_config_disable_multicast",
+	    "network_config_disable_reliable_udp",
+	    "network_config_enable_multicast",
+	    "network_config_enable_reliable_udp",
+	    "network_config_use_non_blocking_socket",
+	    "network_config_websocket_protocol",
+	    "network_connect_active",
+	    "network_connect_blocking",
+	    "network_connect_nonblocking",
+	    "network_connect_none",
+	    "network_connect_passive",
+	    "network_send_binary",
+	    "network_send_text",
+	    "network_socket_bluetooth",
+	    "network_socket_tcp",
+	    "network_socket_udp",
+	    "network_socket_ws",
+	    "network_socket_wss",
+	    "network_type_connect",
+	    "network_type_data",
+	    "network_type_disconnect",
+	    "network_type_down",
+	    "network_type_non_blocking_connect",
+	    "network_type_up",
+	    "network_type_up_failed",
+	    "nineslice_blank",
+	    "nineslice_bottom",
+	    "nineslice_center",
+	    "nineslice_centre",
+	    "nineslice_hide",
+	    "nineslice_left",
+	    "nineslice_mirror",
+	    "nineslice_repeat",
+	    "nineslice_right",
+	    "nineslice_stretch",
+	    "nineslice_top",
+	    "noone",
+	    "of_challenge_lose",
+	    "of_challenge_tie",
+	    "of_challenge_win",
+	    "os_android",
+	    "os_gdk",
+	    "os_gxgames",
+	    "os_ios",
+	    "os_linux",
+	    "os_macosx",
+	    "os_operagx",
+	    "os_permission_denied",
+	    "os_permission_denied_dont_request",
+	    "os_permission_granted",
+	    "os_ps3",
+	    "os_ps4",
+	    "os_ps5",
+	    "os_psvita",
+	    "os_switch",
+	    "os_tvos",
+	    "os_unknown",
+	    "os_uwp",
+	    "os_win8native",
+	    "os_windows",
+	    "os_winphone",
+	    "os_xboxone",
+	    "os_xboxseriesxs",
+	    "other",
+	    "outlineColor",
+	    "outlineColour",
+	    "outlineDist",
+	    "outlineEnabled",
+	    "outlineEnabled",
+	    "paragraphSpacing",
+	    "path_action_continue",
+	    "path_action_restart",
+	    "path_action_reverse",
+	    "path_action_stop",
+	    "phy_debug_render_aabb",
+	    "phy_debug_render_collision_pairs",
+	    "phy_debug_render_coms",
+	    "phy_debug_render_core_shapes",
+	    "phy_debug_render_joints",
+	    "phy_debug_render_obb",
+	    "phy_debug_render_shapes",
+	    "phy_joint_anchor_1_x",
+	    "phy_joint_anchor_1_y",
+	    "phy_joint_anchor_2_x",
+	    "phy_joint_anchor_2_y",
+	    "phy_joint_angle",
+	    "phy_joint_angle_limits",
+	    "phy_joint_damping_ratio",
+	    "phy_joint_frequency",
+	    "phy_joint_length_1",
+	    "phy_joint_length_2",
+	    "phy_joint_lower_angle_limit",
+	    "phy_joint_max_force",
+	    "phy_joint_max_length",
+	    "phy_joint_max_motor_force",
+	    "phy_joint_max_motor_torque",
+	    "phy_joint_max_torque",
+	    "phy_joint_motor_force",
+	    "phy_joint_motor_speed",
+	    "phy_joint_motor_torque",
+	    "phy_joint_reaction_force_x",
+	    "phy_joint_reaction_force_y",
+	    "phy_joint_reaction_torque",
+	    "phy_joint_speed",
+	    "phy_joint_translation",
+	    "phy_joint_upper_angle_limit",
+	    "phy_particle_data_flag_category",
+	    "phy_particle_data_flag_color",
+	    "phy_particle_data_flag_colour",
+	    "phy_particle_data_flag_position",
+	    "phy_particle_data_flag_typeflags",
+	    "phy_particle_data_flag_velocity",
+	    "phy_particle_flag_colormixing",
+	    "phy_particle_flag_colourmixing",
+	    "phy_particle_flag_elastic",
+	    "phy_particle_flag_powder",
+	    "phy_particle_flag_spring",
+	    "phy_particle_flag_tensile",
+	    "phy_particle_flag_viscous",
+	    "phy_particle_flag_wall",
+	    "phy_particle_flag_water",
+	    "phy_particle_flag_zombie",
+	    "phy_particle_group_flag_rigid",
+	    "phy_particle_group_flag_solid",
+	    "pi",
+	    "pointer_invalid",
+	    "pointer_null",
+	    "pr_linelist",
+	    "pr_linestrip",
+	    "pr_pointlist",
+	    "pr_trianglefan",
+	    "pr_trianglelist",
+	    "pr_trianglestrip",
+	    "ps_distr_gaussian",
+	    "ps_distr_invgaussian",
+	    "ps_distr_linear",
+	    "ps_mode_burst",
+	    "ps_mode_stream",
+	    "ps_shape_diamond",
+	    "ps_shape_ellipse",
+	    "ps_shape_line",
+	    "ps_shape_rectangle",
+	    "pt_shape_circle",
+	    "pt_shape_cloud",
+	    "pt_shape_disk",
+	    "pt_shape_explosion",
+	    "pt_shape_flare",
+	    "pt_shape_line",
+	    "pt_shape_pixel",
+	    "pt_shape_ring",
+	    "pt_shape_smoke",
+	    "pt_shape_snow",
+	    "pt_shape_spark",
+	    "pt_shape_sphere",
+	    "pt_shape_square",
+	    "pt_shape_star",
+	    "rollback_chat_message",
+	    "rollback_connect_error",
+	    "rollback_connect_info",
+	    "rollback_connected_to_peer",
+	    "rollback_connection_rejected",
+	    "rollback_disconnected_from_peer",
+	    "rollback_end_game",
+	    "rollback_game_full",
+	    "rollback_game_info",
+	    "rollback_game_interrupted",
+	    "rollback_game_resumed",
+	    "rollback_high_latency",
+	    "rollback_player_prefs",
+	    "rollback_protocol_rejected",
+	    "rollback_synchronized_with_peer",
+	    "rollback_synchronizing_with_peer",
+	    "self",
+	    "seqaudiokey_loop",
+	    "seqaudiokey_oneshot",
+	    "seqdir_left",
+	    "seqdir_right",
+	    "seqinterpolation_assign",
+	    "seqinterpolation_lerp",
+	    "seqplay_loop",
+	    "seqplay_oneshot",
+	    "seqplay_pingpong",
+	    "seqtextkey_bottom",
+	    "seqtextkey_center",
+	    "seqtextkey_justify",
+	    "seqtextkey_left",
+	    "seqtextkey_middle",
+	    "seqtextkey_right",
+	    "seqtextkey_top",
+	    "seqtracktype_audio",
+	    "seqtracktype_bool",
+	    "seqtracktype_clipmask",
+	    "seqtracktype_clipmask_mask",
+	    "seqtracktype_clipmask_subject",
+	    "seqtracktype_color",
+	    "seqtracktype_colour",
+	    "seqtracktype_empty",
+	    "seqtracktype_graphic",
+	    "seqtracktype_group",
+	    "seqtracktype_instance",
+	    "seqtracktype_message",
+	    "seqtracktype_moment",
+	    "seqtracktype_particlesystem",
+	    "seqtracktype_real",
+	    "seqtracktype_sequence",
+	    "seqtracktype_spriteframes",
+	    "seqtracktype_string",
+	    "seqtracktype_text",
+	    "shadowColor",
+	    "shadowColour",
+	    "shadowOffsetX",
+	    "shadowOffsetY",
+	    "shadowSoftness",
+	    "sprite_add_ext_error_cancelled",
+	    "sprite_add_ext_error_decompressfailed",
+	    "sprite_add_ext_error_loadfailed",
+	    "sprite_add_ext_error_setupfailed",
+	    "sprite_add_ext_error_spritenotfound",
+	    "sprite_add_ext_error_unknown",
+	    "spritespeed_framespergameframe",
+	    "spritespeed_framespersecond",
+	    "surface_r16float",
+	    "surface_r32float",
+	    "surface_r8unorm",
+	    "surface_rg8unorm",
+	    "surface_rgba16float",
+	    "surface_rgba32float",
+	    "surface_rgba4unorm",
+	    "surface_rgba8unorm",
+	    "texturegroup_status_fetched",
+	    "texturegroup_status_loaded",
+	    "texturegroup_status_loading",
+	    "texturegroup_status_unloaded",
+	    "tf_anisotropic",
+	    "tf_linear",
+	    "tf_point",
+	    "thickness",
+	    "tile_flip",
+	    "tile_index_mask",
+	    "tile_mirror",
+	    "tile_rotate",
+	    "time_source_expire_after",
+	    "time_source_expire_nearest",
+	    "time_source_game",
+	    "time_source_global",
+	    "time_source_state_active",
+	    "time_source_state_initial",
+	    "time_source_state_paused",
+	    "time_source_state_stopped",
+	    "time_source_units_frames",
+	    "time_source_units_seconds",
+	    "timezone_local",
+	    "timezone_utc",
+	    "tm_countvsyncs",
+	    "tm_sleep",
+	    "tm_systemtiming",
+	    "true",
+	    "ty_real",
+	    "ty_string",
+	    "undefined",
+	    "vertex_type_color",
+	    "vertex_type_colour",
+	    "vertex_type_float1",
+	    "vertex_type_float2",
+	    "vertex_type_float3",
+	    "vertex_type_float4",
+	    "vertex_type_ubyte4",
+	    "vertex_usage_binormal",
+	    "vertex_usage_blendindices",
+	    "vertex_usage_blendweight",
+	    "vertex_usage_color",
+	    "vertex_usage_colour",
+	    "vertex_usage_depth",
+	    "vertex_usage_fog",
+	    "vertex_usage_normal",
+	    "vertex_usage_position",
+	    "vertex_usage_psize",
+	    "vertex_usage_sample",
+	    "vertex_usage_tangent",
+	    "vertex_usage_texcoord",
+	    "video_format_rgba",
+	    "video_format_yuv",
+	    "video_status_closed",
+	    "video_status_paused",
+	    "video_status_playing",
+	    "video_status_preparing",
+	    "vk_add",
 	    "vk_alt",
-	    "vk_escape",
-	    "vk_space",
+	    "vk_anykey",
 	    "vk_backspace",
-	    "vk_tab",
-	    "vk_pause",
-	    "vk_printscreen",
-	    "vk_left",
-	    "vk_right",
-	    "vk_up",
-	    "vk_down",
-	    "vk_home",
-	    "vk_end",
+	    "vk_control",
+	    "vk_decimal",
 	    "vk_delete",
-	    "vk_insert",
-	    "vk_pageup",
-	    "vk_pagedown",
+	    "vk_divide",
+	    "vk_down",
+	    "vk_end",
+	    "vk_enter",
+	    "vk_escape",
 	    "vk_f1",
+	    "vk_f10",
+	    "vk_f11",
+	    "vk_f12",
 	    "vk_f2",
 	    "vk_f3",
 	    "vk_f4",
@@ -19906,9 +21166,14 @@ function requireGml () {
 	    "vk_f7",
 	    "vk_f8",
 	    "vk_f9",
-	    "vk_f10",
-	    "vk_f11",
-	    "vk_f12",
+	    "vk_home",
+	    "vk_insert",
+	    "vk_lalt",
+	    "vk_lcontrol",
+	    "vk_left",
+	    "vk_lshift",
+	    "vk_multiply",
+	    "vk_nokey",
 	    "vk_numpad0",
 	    "vk_numpad1",
 	    "vk_numpad2",
@@ -19919,531 +21184,27 @@ function requireGml () {
 	    "vk_numpad7",
 	    "vk_numpad8",
 	    "vk_numpad9",
-	    "vk_divide",
-	    "vk_multiply",
-	    "vk_subtract",
-	    "vk_add",
-	    "vk_decimal",
-	    "vk_lshift",
-	    "vk_lcontrol",
-	    "vk_lalt",
-	    "vk_rshift",
-	    "vk_rcontrol",
+	    "vk_pagedown",
+	    "vk_pageup",
+	    "vk_pause",
+	    "vk_printscreen",
 	    "vk_ralt",
-	    "mb_any",
-	    "mb_none",
-	    "mb_left",
-	    "mb_right",
-	    "mb_middle",
-	    "c_aqua",
-	    "c_black",
-	    "c_blue",
-	    "c_dkgray",
-	    "c_fuchsia",
-	    "c_gray",
-	    "c_green",
-	    "c_lime",
-	    "c_ltgray",
-	    "c_maroon",
-	    "c_navy",
-	    "c_olive",
-	    "c_purple",
-	    "c_red",
-	    "c_silver",
-	    "c_teal",
-	    "c_white",
-	    "c_yellow",
-	    "c_orange",
-	    "fa_left",
-	    "fa_center",
-	    "fa_right",
-	    "fa_top",
-	    "fa_middle",
-	    "fa_bottom",
-	    "pr_pointlist",
-	    "pr_linelist",
-	    "pr_linestrip",
-	    "pr_trianglelist",
-	    "pr_trianglestrip",
-	    "pr_trianglefan",
-	    "bm_complex",
-	    "bm_normal",
-	    "bm_add",
-	    "bm_max",
-	    "bm_subtract",
-	    "bm_zero",
-	    "bm_one",
-	    "bm_src_colour",
-	    "bm_inv_src_colour",
-	    "bm_src_color",
-	    "bm_inv_src_color",
-	    "bm_src_alpha",
-	    "bm_inv_src_alpha",
-	    "bm_dest_alpha",
-	    "bm_inv_dest_alpha",
-	    "bm_dest_colour",
-	    "bm_inv_dest_colour",
-	    "bm_dest_color",
-	    "bm_inv_dest_color",
-	    "bm_src_alpha_sat",
-	    "tf_point",
-	    "tf_linear",
-	    "tf_anisotropic",
-	    "mip_off",
-	    "mip_on",
-	    "mip_markedonly",
-	    "audio_falloff_none",
-	    "audio_falloff_inverse_distance",
-	    "audio_falloff_inverse_distance_clamped",
-	    "audio_falloff_linear_distance",
-	    "audio_falloff_linear_distance_clamped",
-	    "audio_falloff_exponent_distance",
-	    "audio_falloff_exponent_distance_clamped",
-	    "audio_old_system",
-	    "audio_new_system",
-	    "audio_mono",
-	    "audio_stereo",
-	    "audio_3d",
-	    "cr_default",
-	    "cr_none",
-	    "cr_arrow",
-	    "cr_cross",
-	    "cr_beam",
-	    "cr_size_nesw",
-	    "cr_size_ns",
-	    "cr_size_nwse",
-	    "cr_size_we",
-	    "cr_uparrow",
-	    "cr_hourglass",
-	    "cr_drag",
-	    "cr_appstart",
-	    "cr_handpoint",
-	    "cr_size_all",
-	    "spritespeed_framespersecond",
-	    "spritespeed_framespergameframe",
-	    "asset_object",
-	    "asset_unknown",
-	    "asset_sprite",
-	    "asset_sound",
-	    "asset_room",
-	    "asset_path",
-	    "asset_script",
-	    "asset_font",
-	    "asset_timeline",
-	    "asset_tiles",
-	    "asset_shader",
-	    "fa_readonly",
-	    "fa_hidden",
-	    "fa_sysfile",
-	    "fa_volumeid",
-	    "fa_directory",
-	    "fa_archive",
-	    "ds_type_map",
-	    "ds_type_list",
-	    "ds_type_stack",
-	    "ds_type_queue",
-	    "ds_type_grid",
-	    "ds_type_priority",
-	    "ef_explosion",
-	    "ef_ring",
-	    "ef_ellipse",
-	    "ef_firework",
-	    "ef_smoke",
-	    "ef_smokeup",
-	    "ef_star",
-	    "ef_spark",
-	    "ef_flare",
-	    "ef_cloud",
-	    "ef_rain",
-	    "ef_snow",
-	    "pt_shape_pixel",
-	    "pt_shape_disk",
-	    "pt_shape_square",
-	    "pt_shape_line",
-	    "pt_shape_star",
-	    "pt_shape_circle",
-	    "pt_shape_ring",
-	    "pt_shape_sphere",
-	    "pt_shape_flare",
-	    "pt_shape_spark",
-	    "pt_shape_explosion",
-	    "pt_shape_cloud",
-	    "pt_shape_smoke",
-	    "pt_shape_snow",
-	    "ps_distr_linear",
-	    "ps_distr_gaussian",
-	    "ps_distr_invgaussian",
-	    "ps_shape_rectangle",
-	    "ps_shape_ellipse",
-	    "ps_shape_diamond",
-	    "ps_shape_line",
-	    "ty_real",
-	    "ty_string",
-	    "dll_cdecl",
-	    "dll_stdcall",
-	    "matrix_view",
-	    "matrix_projection",
-	    "matrix_world",
-	    "os_win32",
-	    "os_windows",
-	    "os_macosx",
-	    "os_ios",
-	    "os_android",
-	    "os_symbian",
-	    "os_linux",
-	    "os_unknown",
-	    "os_winphone",
-	    "os_tizen",
-	    "os_win8native",
-	    "os_wiiu",
-	    "os_3ds",
-	    "os_psvita",
-	    "os_bb10",
-	    "os_ps4",
-	    "os_xboxone",
-	    "os_ps3",
-	    "os_xbox360",
-	    "os_uwp",
-	    "os_tvos",
-	    "os_switch",
-	    "browser_not_a_browser",
-	    "browser_unknown",
-	    "browser_ie",
-	    "browser_firefox",
-	    "browser_chrome",
-	    "browser_safari",
-	    "browser_safari_mobile",
-	    "browser_opera",
-	    "browser_tizen",
-	    "browser_edge",
-	    "browser_windows_store",
-	    "browser_ie_mobile",
-	    "device_ios_unknown",
-	    "device_ios_iphone",
-	    "device_ios_iphone_retina",
-	    "device_ios_ipad",
-	    "device_ios_ipad_retina",
-	    "device_ios_iphone5",
-	    "device_ios_iphone6",
-	    "device_ios_iphone6plus",
-	    "device_emulator",
-	    "device_tablet",
-	    "display_landscape",
-	    "display_landscape_flipped",
-	    "display_portrait",
-	    "display_portrait_flipped",
-	    "tm_sleep",
-	    "tm_countvsyncs",
-	    "of_challenge_win",
-	    "of_challen",
-	    "ge_lose",
-	    "of_challenge_tie",
-	    "leaderboard_type_number",
-	    "leaderboard_type_time_mins_secs",
-	    "cmpfunc_never",
-	    "cmpfunc_less",
-	    "cmpfunc_equal",
-	    "cmpfunc_lessequal",
-	    "cmpfunc_greater",
-	    "cmpfunc_notequal",
-	    "cmpfunc_greaterequal",
-	    "cmpfunc_always",
-	    "cull_noculling",
-	    "cull_clockwise",
-	    "cull_counterclockwise",
-	    "lighttype_dir",
-	    "lighttype_point",
-	    "iap_ev_storeload",
-	    "iap_ev_product",
-	    "iap_ev_purchase",
-	    "iap_ev_consume",
-	    "iap_ev_restore",
-	    "iap_storeload_ok",
-	    "iap_storeload_failed",
-	    "iap_status_uninitialised",
-	    "iap_status_unavailable",
-	    "iap_status_loading",
-	    "iap_status_available",
-	    "iap_status_processing",
-	    "iap_status_restoring",
-	    "iap_failed",
-	    "iap_unavailable",
-	    "iap_available",
-	    "iap_purchased",
-	    "iap_canceled",
-	    "iap_refunded",
-	    "fb_login_default",
-	    "fb_login_fallback_to_webview",
-	    "fb_login_no_fallback_to_webview",
-	    "fb_login_forcing_webview",
-	    "fb_login_use_system_account",
-	    "fb_login_forcing_safari",
-	    "phy_joint_anchor_1_x",
-	    "phy_joint_anchor_1_y",
-	    "phy_joint_anchor_2_x",
-	    "phy_joint_anchor_2_y",
-	    "phy_joint_reaction_force_x",
-	    "phy_joint_reaction_force_y",
-	    "phy_joint_reaction_torque",
-	    "phy_joint_motor_speed",
-	    "phy_joint_angle",
-	    "phy_joint_motor_torque",
-	    "phy_joint_max_motor_torque",
-	    "phy_joint_translation",
-	    "phy_joint_speed",
-	    "phy_joint_motor_force",
-	    "phy_joint_max_motor_force",
-	    "phy_joint_length_1",
-	    "phy_joint_length_2",
-	    "phy_joint_damping_ratio",
-	    "phy_joint_frequency",
-	    "phy_joint_lower_angle_limit",
-	    "phy_joint_upper_angle_limit",
-	    "phy_joint_angle_limits",
-	    "phy_joint_max_length",
-	    "phy_joint_max_torque",
-	    "phy_joint_max_force",
-	    "phy_debug_render_aabb",
-	    "phy_debug_render_collision_pairs",
-	    "phy_debug_render_coms",
-	    "phy_debug_render_core_shapes",
-	    "phy_debug_render_joints",
-	    "phy_debug_render_obb",
-	    "phy_debug_render_shapes",
-	    "phy_particle_flag_water",
-	    "phy_particle_flag_zombie",
-	    "phy_particle_flag_wall",
-	    "phy_particle_flag_spring",
-	    "phy_particle_flag_elastic",
-	    "phy_particle_flag_viscous",
-	    "phy_particle_flag_powder",
-	    "phy_particle_flag_tensile",
-	    "phy_particle_flag_colourmixing",
-	    "phy_particle_flag_colormixing",
-	    "phy_particle_group_flag_solid",
-	    "phy_particle_group_flag_rigid",
-	    "phy_particle_data_flag_typeflags",
-	    "phy_particle_data_flag_position",
-	    "phy_particle_data_flag_velocity",
-	    "phy_particle_data_flag_colour",
-	    "phy_particle_data_flag_color",
-	    "phy_particle_data_flag_category",
-	    "achievement_our_info",
-	    "achievement_friends_info",
-	    "achievement_leaderboard_info",
-	    "achievement_achievement_info",
-	    "achievement_filter_all_players",
-	    "achievement_filter_friends_only",
-	    "achievement_filter_favorites_only",
-	    "achievement_type_achievement_challenge",
-	    "achievement_type_score_challenge",
-	    "achievement_pic_loaded",
-	    "achievement_show_ui",
-	    "achievement_show_profile",
-	    "achievement_show_leaderboard",
-	    "achievement_show_achievement",
-	    "achievement_show_bank",
-	    "achievement_show_friend_picker",
-	    "achievement_show_purchase_prompt",
-	    "network_socket_tcp",
-	    "network_socket_udp",
-	    "network_socket_bluetooth",
-	    "network_type_connect",
-	    "network_type_disconnect",
-	    "network_type_data",
-	    "network_type_non_blocking_connect",
-	    "network_config_connect_timeout",
-	    "network_config_use_non_blocking_socket",
-	    "network_config_enable_reliable_udp",
-	    "network_config_disable_reliable_udp",
-	    "buffer_fixed",
-	    "buffer_grow",
-	    "buffer_wrap",
-	    "buffer_fast",
-	    "buffer_vbuffer",
-	    "buffer_network",
-	    "buffer_u8",
-	    "buffer_s8",
-	    "buffer_u16",
-	    "buffer_s16",
-	    "buffer_u32",
-	    "buffer_s32",
-	    "buffer_u64",
-	    "buffer_f16",
-	    "buffer_f32",
-	    "buffer_f64",
-	    "buffer_bool",
-	    "buffer_text",
-	    "buffer_string",
-	    "buffer_surface_copy",
-	    "buffer_seek_start",
-	    "buffer_seek_relative",
-	    "buffer_seek_end",
-	    "buffer_generalerror",
-	    "buffer_outofspace",
-	    "buffer_outofbounds",
-	    "buffer_invalidtype",
-	    "text_type",
-	    "button_type",
-	    "input_type",
-	    "ANSI_CHARSET",
-	    "DEFAULT_CHARSET",
-	    "EASTEUROPE_CHARSET",
-	    "RUSSIAN_CHARSET",
-	    "SYMBOL_CHARSET",
-	    "SHIFTJIS_CHARSET",
-	    "HANGEUL_CHARSET",
-	    "GB2312_CHARSET",
-	    "CHINESEBIG5_CHARSET",
-	    "JOHAB_CHARSET",
-	    "HEBREW_CHARSET",
-	    "ARABIC_CHARSET",
-	    "GREEK_CHARSET",
-	    "TURKISH_CHARSET",
-	    "VIETNAMESE_CHARSET",
-	    "THAI_CHARSET",
-	    "MAC_CHARSET",
-	    "BALTIC_CHARSET",
-	    "OEM_CHARSET",
-	    "gp_face1",
-	    "gp_face2",
-	    "gp_face3",
-	    "gp_face4",
-	    "gp_shoulderl",
-	    "gp_shoulderr",
-	    "gp_shoulderlb",
-	    "gp_shoulderrb",
-	    "gp_select",
-	    "gp_start",
-	    "gp_stickl",
-	    "gp_stickr",
-	    "gp_padu",
-	    "gp_padd",
-	    "gp_padl",
-	    "gp_padr",
-	    "gp_axislh",
-	    "gp_axislv",
-	    "gp_axisrh",
-	    "gp_axisrv",
-	    "ov_friends",
-	    "ov_community",
-	    "ov_players",
-	    "ov_settings",
-	    "ov_gamegroup",
-	    "ov_achievements",
-	    "lb_sort_none",
-	    "lb_sort_ascending",
-	    "lb_sort_descending",
-	    "lb_disp_none",
-	    "lb_disp_numeric",
-	    "lb_disp_time_sec",
-	    "lb_disp_time_ms",
-	    "ugc_result_success",
-	    "ugc_filetype_community",
-	    "ugc_filetype_microtrans",
-	    "ugc_visibility_public",
-	    "ugc_visibility_friends_only",
-	    "ugc_visibility_private",
-	    "ugc_query_RankedByVote",
-	    "ugc_query_RankedByPublicationDate",
-	    "ugc_query_AcceptedForGameRankedByAcceptanceDate",
-	    "ugc_query_RankedByTrend",
-	    "ugc_query_FavoritedByFriendsRankedByPublicationDate",
-	    "ugc_query_CreatedByFriendsRankedByPublicationDate",
-	    "ugc_query_RankedByNumTimesReported",
-	    "ugc_query_CreatedByFollowedUsersRankedByPublicationDate",
-	    "ugc_query_NotYetRated",
-	    "ugc_query_RankedByTotalVotesAsc",
-	    "ugc_query_RankedByVotesUp",
-	    "ugc_query_RankedByTextSearch",
-	    "ugc_sortorder_CreationOrderDesc",
-	    "ugc_sortorder_CreationOrderAsc",
-	    "ugc_sortorder_TitleAsc",
-	    "ugc_sortorder_LastUpdatedDesc",
-	    "ugc_sortorder_SubscriptionDateDesc",
-	    "ugc_sortorder_VoteScoreDesc",
-	    "ugc_sortorder_ForModeration",
-	    "ugc_list_Published",
-	    "ugc_list_VotedOn",
-	    "ugc_list_VotedUp",
-	    "ugc_list_VotedDown",
-	    "ugc_list_WillVoteLater",
-	    "ugc_list_Favorited",
-	    "ugc_list_Subscribed",
-	    "ugc_list_UsedOrPlayed",
-	    "ugc_list_Followed",
-	    "ugc_match_Items",
-	    "ugc_match_Items_Mtx",
-	    "ugc_match_Items_ReadyToUse",
-	    "ugc_match_Collections",
-	    "ugc_match_Artwork",
-	    "ugc_match_Videos",
-	    "ugc_match_Screenshots",
-	    "ugc_match_AllGuides",
-	    "ugc_match_WebGuides",
-	    "ugc_match_IntegratedGuides",
-	    "ugc_match_UsableInGame",
-	    "ugc_match_ControllerBindings",
-	    "vertex_usage_position",
-	    "vertex_usage_colour",
-	    "vertex_usage_color",
-	    "vertex_usage_normal",
-	    "vertex_usage_texcoord",
-	    "vertex_usage_textcoord",
-	    "vertex_usage_blendweight",
-	    "vertex_usage_blendindices",
-	    "vertex_usage_psize",
-	    "vertex_usage_tangent",
-	    "vertex_usage_binormal",
-	    "vertex_usage_fog",
-	    "vertex_usage_depth",
-	    "vertex_usage_sample",
-	    "vertex_type_float1",
-	    "vertex_type_float2",
-	    "vertex_type_float3",
-	    "vertex_type_float4",
-	    "vertex_type_colour",
-	    "vertex_type_color",
-	    "vertex_type_ubyte4",
-	    "layerelementtype_undefined",
-	    "layerelementtype_background",
-	    "layerelementtype_instance",
-	    "layerelementtype_oldtilemap",
-	    "layerelementtype_sprite",
-	    "layerelementtype_tilemap",
-	    "layerelementtype_particlesystem",
-	    "layerelementtype_tile",
-	    "tile_rotate",
-	    "tile_flip",
-	    "tile_mirror",
-	    "tile_index_mask",
-	    "kbv_type_default",
-	    "kbv_type_ascii",
-	    "kbv_type_url",
-	    "kbv_type_email",
-	    "kbv_type_numbers",
-	    "kbv_type_phone",
-	    "kbv_type_phone_name",
-	    "kbv_returnkey_default",
-	    "kbv_returnkey_go",
-	    "kbv_returnkey_google",
-	    "kbv_returnkey_join",
-	    "kbv_returnkey_next",
-	    "kbv_returnkey_route",
-	    "kbv_returnkey_search",
-	    "kbv_returnkey_send",
-	    "kbv_returnkey_yahoo",
-	    "kbv_returnkey_done",
-	    "kbv_returnkey_continue",
-	    "kbv_returnkey_emergency",
-	    "kbv_autocapitalize_none",
-	    "kbv_autocapitalize_words",
-	    "kbv_autocapitalize_sentences",
-	    "kbv_autocapitalize_characters"
+	    "vk_rcontrol",
+	    "vk_return",
+	    "vk_right",
+	    "vk_rshift",
+	    "vk_shift",
+	    "vk_space",
+	    "vk_subtract",
+	    "vk_tab",
+	    "vk_up",
+	    "wallpaper_config",
+	    "wallpaper_subscription_data",
+	    "wrap"
 	  ];
 	  const LANGUAGE_VARIABLES = [
-	    "self",
-	    "argument_relative",
+	    "alarm",
+	    "application_surface",
 	    "argument",
 	    "argument0",
 	    "argument1",
@@ -20462,185 +21223,182 @@ function requireGml () {
 	    "argument14",
 	    "argument15",
 	    "argument_count",
-	    "x|0",
-	    "y|0",
-	    "xprevious",
-	    "yprevious",
-	    "xstart",
-	    "ystart",
-	    "hspeed",
-	    "vspeed",
-	    "direction",
-	    "speed",
-	    "friction",
-	    "gravity",
-	    "gravity_direction",
-	    "path_index",
-	    "path_position",
-	    "path_positionprevious",
-	    "path_speed",
-	    "path_scale",
-	    "path_orientation",
-	    "path_endaction",
-	    "object_index",
-	    "id|0",
-	    "solid",
-	    "persistent",
-	    "mask_index",
-	    "instance_count",
-	    "instance_id",
-	    "room_speed",
-	    "fps",
-	    "fps_real",
-	    "current_time",
-	    "current_year",
-	    "current_month",
-	    "current_day",
-	    "current_weekday",
-	    "current_hour",
-	    "current_minute",
-	    "current_second",
-	    "alarm",
-	    "timeline_index",
-	    "timeline_position",
-	    "timeline_speed",
-	    "timeline_running",
-	    "timeline_loop",
-	    "room",
-	    "room_first",
-	    "room_last",
-	    "room_width",
-	    "room_height",
-	    "room_caption",
-	    "room_persistent",
-	    "score",
-	    "lives",
-	    "health",
-	    "show_score",
-	    "show_lives",
-	    "show_health",
-	    "caption_score",
-	    "caption_lives",
-	    "caption_health",
-	    "event_type",
-	    "event_number",
-	    "event_object",
-	    "event_action",
-	    "application_surface",
-	    "gamemaker_pro",
-	    "gamemaker_registered",
-	    "gamemaker_version",
-	    "error_occurred",
-	    "error_last",
-	    "debug_mode",
-	    "keyboard_key",
-	    "keyboard_lastkey",
-	    "keyboard_lastchar",
-	    "keyboard_string",
-	    "mouse_x",
-	    "mouse_y",
-	    "mouse_button",
-	    "mouse_lastbutton",
-	    "cursor_sprite",
-	    "visible",
-	    "sprite_index",
-	    "sprite_width",
-	    "sprite_height",
-	    "sprite_xoffset",
-	    "sprite_yoffset",
-	    "image_number",
-	    "image_index",
-	    "image_speed",
-	    "depth",
-	    "image_xscale",
-	    "image_yscale",
-	    "image_angle",
-	    "image_alpha",
-	    "image_blend",
+	    "async_load",
+	    "background_color",
+	    "background_colour",
+	    "background_showcolor",
+	    "background_showcolour",
+	    "bbox_bottom",
 	    "bbox_left",
 	    "bbox_right",
 	    "bbox_top",
-	    "bbox_bottom",
-	    "layer",
-	    "background_colour",
-	    "background_showcolour",
-	    "background_color",
-	    "background_showcolor",
-	    "view_enabled",
-	    "view_current",
-	    "view_visible",
-	    "view_xview",
-	    "view_yview",
-	    "view_wview",
-	    "view_hview",
-	    "view_xport",
-	    "view_yport",
-	    "view_wport",
-	    "view_hport",
-	    "view_angle",
-	    "view_hborder",
-	    "view_vborder",
-	    "view_hspeed",
-	    "view_vspeed",
-	    "view_object",
-	    "view_surface_id",
-	    "view_camera",
-	    "game_id",
+	    "browser_height",
+	    "browser_width",
+	    "colour?ColourTrack",
+	    "current_day",
+	    "current_hour",
+	    "current_minute",
+	    "current_month",
+	    "current_second",
+	    "current_time",
+	    "current_weekday",
+	    "current_year",
+	    "cursor_sprite",
+	    "debug_mode",
+	    "delta_time",
+	    "depth",
+	    "direction",
+	    "display_aa",
+	    "drawn_by_sequence",
+	    "event_action",
+	    "event_data",
+	    "event_number",
+	    "event_object",
+	    "event_type",
+	    "font_texture_page_size",
+	    "fps",
+	    "fps_real",
+	    "friction",
 	    "game_display_name",
+	    "game_id",
 	    "game_project_name",
 	    "game_save_id",
-	    "working_directory",
-	    "temp_directory",
-	    "program_directory",
-	    "browser_width",
-	    "browser_height",
-	    "os_type",
-	    "os_device",
-	    "os_browser",
-	    "os_version",
-	    "display_aa",
-	    "async_load",
-	    "delta_time",
-	    "webgl_enabled",
-	    "event_data",
+	    "gravity",
+	    "gravity_direction",
+	    "health",
+	    "hspeed",
 	    "iap_data",
-	    "phy_rotation",
-	    "phy_position_x",
-	    "phy_position_y",
-	    "phy_angular_velocity",
-	    "phy_linear_velocity_x",
-	    "phy_linear_velocity_y",
-	    "phy_speed_x",
-	    "phy_speed_y",
-	    "phy_speed",
-	    "phy_angular_damping",
-	    "phy_linear_damping",
-	    "phy_bullet",
-	    "phy_fixed_rotation",
+	    "id",
+	    "image_alpha",
+	    "image_angle",
+	    "image_blend",
+	    "image_index",
+	    "image_number",
+	    "image_speed",
+	    "image_xscale",
+	    "image_yscale",
+	    "in_collision_tree",
+	    "in_sequence",
+	    "instance_count",
+	    "instance_id",
+	    "keyboard_key",
+	    "keyboard_lastchar",
+	    "keyboard_lastkey",
+	    "keyboard_string",
+	    "layer",
+	    "lives",
+	    "longMessage",
+	    "managed",
+	    "mask_index",
+	    "message",
+	    "mouse_button",
+	    "mouse_lastbutton",
+	    "mouse_x",
+	    "mouse_y",
+	    "object_index",
+	    "os_browser",
+	    "os_device",
+	    "os_type",
+	    "os_version",
+	    "path_endaction",
+	    "path_index",
+	    "path_orientation",
+	    "path_position",
+	    "path_positionprevious",
+	    "path_scale",
+	    "path_speed",
+	    "persistent",
 	    "phy_active",
-	    "phy_mass",
-	    "phy_inertia",
-	    "phy_com_x",
-	    "phy_com_y",
-	    "phy_dynamic",
-	    "phy_kinematic",
-	    "phy_sleeping",
+	    "phy_angular_damping",
+	    "phy_angular_velocity",
+	    "phy_bullet",
+	    "phy_col_normal_x",
+	    "phy_col_normal_y",
 	    "phy_collision_points",
 	    "phy_collision_x",
 	    "phy_collision_y",
-	    "phy_col_normal_x",
-	    "phy_col_normal_y",
+	    "phy_com_x",
+	    "phy_com_y",
+	    "phy_dynamic",
+	    "phy_fixed_rotation",
+	    "phy_inertia",
+	    "phy_kinematic",
+	    "phy_linear_damping",
+	    "phy_linear_velocity_x",
+	    "phy_linear_velocity_y",
+	    "phy_mass",
+	    "phy_position_x",
 	    "phy_position_xprevious",
-	    "phy_position_yprevious"
+	    "phy_position_y",
+	    "phy_position_yprevious",
+	    "phy_rotation",
+	    "phy_sleeping",
+	    "phy_speed",
+	    "phy_speed_x",
+	    "phy_speed_y",
+	    "player_avatar_sprite",
+	    "player_avatar_url",
+	    "player_id",
+	    "player_local",
+	    "player_type",
+	    "player_user_id",
+	    "program_directory",
+	    "rollback_api_server",
+	    "rollback_confirmed_frame",
+	    "rollback_current_frame",
+	    "rollback_event_id",
+	    "rollback_event_param",
+	    "rollback_game_running",
+	    "room",
+	    "room_first",
+	    "room_height",
+	    "room_last",
+	    "room_persistent",
+	    "room_speed",
+	    "room_width",
+	    "score",
+	    "script",
+	    "sequence_instance",
+	    "solid",
+	    "speed",
+	    "sprite_height",
+	    "sprite_index",
+	    "sprite_width",
+	    "sprite_xoffset",
+	    "sprite_yoffset",
+	    "stacktrace",
+	    "temp_directory",
+	    "timeline_index",
+	    "timeline_loop",
+	    "timeline_position",
+	    "timeline_running",
+	    "timeline_speed",
+	    "view_camera",
+	    "view_current",
+	    "view_enabled",
+	    "view_hport",
+	    "view_surface_id",
+	    "view_visible",
+	    "view_wport",
+	    "view_xport",
+	    "view_yport",
+	    "visible",
+	    "vspeed",
+	    "webgl_enabled",
+	    "working_directory",
+	    "x",
+	    "xprevious",
+	    "xstart",
+	    "y",
+	    "yprevious",
+	    "ystart"
 	  ];
-
 	  return {
 	    name: 'GML',
 	    case_insensitive: false, // language is case-insensitive
 	    keywords: {
 	      keyword: KEYWORDS,
 	      built_in: BUILT_INS,
-	      literal: LITERALS,
 	      symbol: SYMBOLS,
 	      "variable.language": LANGUAGE_VARIABLES
 	    },
@@ -20775,10 +21533,25 @@ function requireGo () {
 	        className: 'number',
 	        variants: [
 	          {
-	            begin: hljs.C_NUMBER_RE + '[i]',
-	            relevance: 1
+	            match: /-?\b0[xX]\.[a-fA-F0-9](_?[a-fA-F0-9])*[pP][+-]?\d(_?\d)*i?/, // hex without a present digit before . (making a digit afterwards required)
+	            relevance: 0
 	          },
-	          hljs.C_NUMBER_MODE
+	          {
+	            match: /-?\b0[xX](_?[a-fA-F0-9])+((\.([a-fA-F0-9](_?[a-fA-F0-9])*)?)?[pP][+-]?\d(_?\d)*)?i?/, // hex with a present digit before . (making a digit afterwards optional)
+	            relevance: 0
+	          },
+	          {
+	            match: /-?\b0[oO](_?[0-7])*i?/, // leading 0o octal
+	            relevance: 0
+	          },
+	          {
+	            match: /-?\.\d(_?\d)*([eE][+-]?\d(_?\d)*)?i?/, // decimal without a present digit before . (making a digit afterwards required)
+	            relevance: 0
+	          },
+	          {
+	            match: /-?\b\d(_?\d)*(\.(\d(_?\d)*)?)?([eE][+-]?\d(_?\d)*)?i?/, // decimal with a present digit before . (making a digit afterwards optional)
+	            relevance: 0
+	          }
 	        ]
 	      },
 	      { begin: /:=/ // relevance booster
@@ -20813,6 +21586,7 @@ Language: Golo
 Author: Philippe Charriere <ph.charriere@gmail.com>
 Description: a lightweight dynamic language for the JVM
 Website: http://golo-lang.org/
+Category: system
 */
 
 var golo_1;
@@ -20902,6 +21676,7 @@ Language: Gradle
 Description: Gradle is an open-source build automation tool focused on flexibility and performance.
 Website: https://gradle.org
 Author: Damian Mee <mee.damian@gmail.com>
+Category: build-system
 */
 
 var gradle_1;
@@ -21096,10 +21871,10 @@ function requireGradle () {
 }
 
 /*
- Language: graphql
- Category: scripting, protocols, web
+ Language: GraphQL
  Author: John Foster (GH jf990), and others
- Description: Highlight GraphQL queries with highlight.js.
+ Description: GraphQL is a query language for APIs
+ Category: web, common
 */
 
 var graphql_1;
@@ -21187,6 +21962,7 @@ function requireGraphql () {
  Author: Guillaume Laforge <glaforge@gmail.com>
  Description: Groovy programming language implementation inspired from Vsevolod's Java mode
  Website: https://groovy-lang.org
+ Category: system
  */
 
 var groovy_1;
@@ -21256,7 +22032,7 @@ function requireGroovy () {
 
 	  const CLASS_DEFINITION = {
 	    match: [
-	      /(class|interface|trait|enum|extends|implements)/,
+	      /(class|interface|trait|enum|record|extends|implements)/,
 	      /\s+/,
 	      hljs.UNDERSCORE_IDENT_RE
 	    ],
@@ -21316,7 +22092,8 @@ function requireGroovy () {
 	    "import",
 	    "package",
 	    "return",
-	    "instanceof"
+	    "instanceof",
+	    "var"
 	  ];
 
 	  return {
@@ -21783,8 +22560,32 @@ function requireHaskell () {
 	if (hasRequiredHaskell) return haskell_1;
 	hasRequiredHaskell = 1;
 	function haskell(hljs) {
+
+	  /* See:
+	     - https://www.haskell.org/onlinereport/lexemes.html
+	     - https://downloads.haskell.org/ghc/9.0.1/docs/html/users_guide/exts/binary_literals.html
+	     - https://downloads.haskell.org/ghc/9.0.1/docs/html/users_guide/exts/numeric_underscores.html
+	     - https://downloads.haskell.org/ghc/9.0.1/docs/html/users_guide/exts/hex_float_literals.html
+	  */
+	  const decimalDigits = '([0-9]_*)+';
+	  const hexDigits = '([0-9a-fA-F]_*)+';
+	  const binaryDigits = '([01]_*)+';
+	  const octalDigits = '([0-7]_*)+';
+	  const ascSymbol = '[!#$%&*+.\\/<=>?@\\\\^~-]';
+	  const uniSymbol = '(\\p{S}|\\p{P})'; // Symbol or Punctuation
+	  const special = '[(),;\\[\\]`|{}]';
+	  const symbol = `(${ascSymbol}|(?!(${special}|[_:"']))${uniSymbol})`;
+
 	  const COMMENT = { variants: [
-	    hljs.COMMENT('--', '$'),
+	    // Double dash forms a valid comment only if it's not part of legal lexeme.
+	    // See: Haskell 98 report: https://www.haskell.org/onlinereport/lexemes.html
+	    //
+	    // The commented code does the job, but we can't use negative lookbehind,
+	    // due to poor support by Safari browser.
+	    // > hljs.COMMENT(`(?<!${symbol})--+(?!${symbol})`, '$'),
+	    // So instead, we'll add a no-markup rule before the COMMENT rule in the rules list
+	    // to match the problematic infix operators that contain double dash.
+	    hljs.COMMENT('--+', '$'),
 	    hljs.COMMENT(
 	      /\{-/,
 	      /-\}/,
@@ -21832,19 +22633,6 @@ function requireHaskell () {
 	    contains: LIST.contains
 	  };
 
-	  /* See:
-
-	     - https://www.haskell.org/onlinereport/lexemes.html
-	     - https://downloads.haskell.org/ghc/9.0.1/docs/html/users_guide/exts/binary_literals.html
-	     - https://downloads.haskell.org/ghc/9.0.1/docs/html/users_guide/exts/numeric_underscores.html
-	     - https://downloads.haskell.org/ghc/9.0.1/docs/html/users_guide/exts/hex_float_literals.html
-
-	  */
-	  const decimalDigits = '([0-9]_*)+';
-	  const hexDigits = '([0-9a-fA-F]_*)+';
-	  const binaryDigits = '([01]_*)+';
-	  const octalDigits = '([0-7]_*)+';
-
 	  const NUMBER = {
 	    className: 'number',
 	    relevance: 0,
@@ -21868,6 +22656,7 @@ function requireHaskell () {
 	      + 'qualified type data newtype deriving class instance as default '
 	      + 'infix infixl infixr foreign export ccall stdcall cplusplus '
 	      + 'jvm dotnet safe unsafe family forall mdo proc rec',
+	    unicodeRegex: true,
 	    contains: [
 	      // Top-level constructions.
 	      {
@@ -21953,11 +22742,24 @@ function requireHaskell () {
 
 	      // Literals and names.
 
-	      // TODO: characters.
+	      // Single characters.
+	      {
+	        scope: 'string',
+	        begin: /'(?=\\?.')/,
+	        end: /'/,
+	        contains: [
+	          {
+	            scope: 'char.escape',
+	            match: /\\./,
+	          },
+	        ]
+	      },
 	      hljs.QUOTE_STRING_MODE,
 	      NUMBER,
 	      CONSTRUCTOR,
 	      hljs.inherit(hljs.TITLE_MODE, { begin: '^[_a-z][\\w\']*' }),
+	      // No markup, prevents infix operators from being recognized as comments.
+	      { begin: `(?!-)${symbol}--+|--+(?!-)${symbol}`},
 	      COMMENT,
 	      { // No markup, relevance booster
 	        begin: '->|<-' }
@@ -21975,6 +22777,7 @@ Description: Haxe is an open source toolkit based on a modern, high level, stric
 Author: Christopher Kaster <ikasoki@gmail.com> (Based on the actionscript.js language file by Alexander Myadzel)
 Contributors: Kenton Hamaluik <kentonh@gmail.com>
 Website: https://haxe.org
+Category: system
 */
 
 var haxe_1;
@@ -21984,6 +22787,10 @@ function requireHaxe () {
 	if (hasRequiredHaxe) return haxe_1;
 	hasRequiredHaxe = 1;
 	function haxe(hljs) {
+	  const IDENT_RE = '[a-zA-Z_$][a-zA-Z0-9_$]*';
+
+	  // C_NUMBER_RE with underscores and literal suffixes
+	  const HAXE_NUMBER_RE = /(-?)(\b0[xX][a-fA-F0-9_]+|(\b\d+(\.[\d_]*)?|\.[\d_]+)(([eE][-+]?\d+)|i32|u32|i64|f64)?)/;
 
 	  const HAXE_BASIC_TYPES = 'Int Float String Bool Dynamic Void Array ';
 
@@ -21991,8 +22798,8 @@ function requireHaxe () {
 	    name: 'Haxe',
 	    aliases: [ 'hx' ],
 	    keywords: {
-	      keyword: 'break case cast catch continue default do dynamic else enum extern '
-	               + 'for function here if import in inline never new override package private get set '
+	      keyword: 'abstract break case cast catch continue default do dynamic else enum extern '
+	               + 'final for function here if import in inline is macro never new override package private get set '
 	               + 'public return static super switch this throw trace try typedef untyped using var while '
 	               + HAXE_BASIC_TYPES,
 	      built_in:
@@ -22009,12 +22816,12 @@ function requireHaxe () {
 	          hljs.BACKSLASH_ESCAPE,
 	          {
 	            className: 'subst', // interpolation
-	            begin: '\\$\\{',
-	            end: '\\}'
+	            begin: /\$\{/,
+	            end: /\}/
 	          },
 	          {
 	            className: 'subst', // interpolation
-	            begin: '\\$',
+	            begin: /\$/,
 	            end: /\W\}/
 	          }
 	        ]
@@ -22022,11 +22829,20 @@ function requireHaxe () {
 	      hljs.QUOTE_STRING_MODE,
 	      hljs.C_LINE_COMMENT_MODE,
 	      hljs.C_BLOCK_COMMENT_MODE,
-	      hljs.C_NUMBER_MODE,
+	      {
+	        className: 'number',
+	        begin: HAXE_NUMBER_RE,
+	        relevance: 0
+	      },
+	      {
+	        className: 'variable',
+	        begin: "\\$" + IDENT_RE,
+	      },
 	      {
 	        className: 'meta', // compiler meta
-	        begin: '@:',
-	        end: '$'
+	        begin: /@:?/,
+	        end: /\(|$/,
+	        excludeEnd: true,
 	      },
 	      {
 	        className: 'meta', // compiler conditionals
@@ -22036,55 +22852,55 @@ function requireHaxe () {
 	      },
 	      {
 	        className: 'type', // function types
-	        begin: ':[ \t]*',
-	        end: '[^A-Za-z0-9_ \t\\->]',
+	        begin: /:[ \t]*/,
+	        end: /[^A-Za-z0-9_ \t\->]/,
 	        excludeBegin: true,
 	        excludeEnd: true,
 	        relevance: 0
 	      },
 	      {
 	        className: 'type', // types
-	        begin: ':[ \t]*',
-	        end: '\\W',
+	        begin: /:[ \t]*/,
+	        end: /\W/,
 	        excludeBegin: true,
 	        excludeEnd: true
 	      },
 	      {
 	        className: 'type', // instantiation
-	        begin: 'new *',
-	        end: '\\W',
+	        beginKeywords: 'new',
+	        end: /\W/,
 	        excludeBegin: true,
 	        excludeEnd: true
 	      },
 	      {
-	        className: 'class', // enums
+	        className: 'title.class', // enums
 	        beginKeywords: 'enum',
-	        end: '\\{',
+	        end: /\{/,
 	        contains: [ hljs.TITLE_MODE ]
 	      },
 	      {
-	        className: 'class', // abstracts
-	        beginKeywords: 'abstract',
-	        end: '[\\{$]',
+	        className: 'title.class', // abstracts
+	        begin: '\\babstract\\b(?=\\s*' + hljs.IDENT_RE + '\\s*\\()',
+	        end: /[\{$]/,
 	        contains: [
 	          {
 	            className: 'type',
-	            begin: '\\(',
-	            end: '\\)',
+	            begin: /\(/,
+	            end: /\)/,
 	            excludeBegin: true,
 	            excludeEnd: true
 	          },
 	          {
 	            className: 'type',
-	            begin: 'from +',
-	            end: '\\W',
+	            begin: /from +/,
+	            end: /\W/,
 	            excludeBegin: true,
 	            excludeEnd: true
 	          },
 	          {
 	            className: 'type',
-	            begin: 'to +',
-	            end: '\\W',
+	            begin: /to +/,
+	            end: /\W/,
 	            excludeBegin: true,
 	            excludeEnd: true
 	          },
@@ -22093,15 +22909,15 @@ function requireHaxe () {
 	        keywords: { keyword: 'abstract from to' }
 	      },
 	      {
-	        className: 'class', // classes
-	        begin: '\\b(class|interface) +',
-	        end: '[\\{$]',
+	        className: 'title.class', // classes
+	        begin: /\b(class|interface) +/,
+	        end: /[\{$]/,
 	        excludeEnd: true,
 	        keywords: 'class interface',
 	        contains: [
 	          {
 	            className: 'keyword',
-	            begin: '\\b(extends|implements) +',
+	            begin: /\b(extends|implements) +/,
 	            keywords: 'extends implements',
 	            contains: [
 	              {
@@ -22115,11 +22931,11 @@ function requireHaxe () {
 	        ]
 	      },
 	      {
-	        className: 'function',
+	        className: 'title.function',
 	        beginKeywords: 'function',
-	        end: '\\(',
+	        end: /\(/,
 	        excludeEnd: true,
-	        illegal: '\\S',
+	        illegal: /\S/,
 	        contains: [ hljs.TITLE_MODE ]
 	      }
 	    ],
@@ -22215,7 +23031,7 @@ function requireHttp () {
 	hasRequiredHttp = 1;
 	function http(hljs) {
 	  const regex = hljs.regex;
-	  const VERSION = 'HTTP/(2|1\\.[01])';
+	  const VERSION = 'HTTP/([32]|1\\.[01])';
 	  const HEADER_NAME = /[A-Za-z][A-Za-z0-9-]*/;
 	  const HEADER = {
 	    className: 'attribute',
@@ -22456,6 +23272,7 @@ Language: Inform 7
 Author: Bruno Dias <bruno.r.dias@gmail.com>
 Description: Language definition for Inform 7, a DSL for writing parser interactive fiction.
 Website: http://inform7.com
+Category: gaming
 */
 
 var inform7_1;
@@ -26037,6 +26854,7 @@ function requireJava () {
 	Website: https://www.java.com/
 	*/
 
+
 	/**
 	 * Allows recursive regex expressions to a given depth
 	 *
@@ -26102,7 +26920,10 @@ function requireJava () {
 	    'requires',
 	    'exports',
 	    'do',
-	    'sealed'
+	    'sealed',
+	    'yield',
+	    'permits',
+	    'goto'
 	  ];
 
 	  const BUILT_INS = [
@@ -26217,7 +27038,7 @@ function requireJava () {
 	          /\s+/,
 	          JAVA_IDENT_RE,
 	          /\s+/,
-	          /=/
+	          /=(?!=)/
 	        ],
 	        className: {
 	          1: "type",
@@ -26437,6 +27258,7 @@ function requireJavascript () {
 	  "window",
 	  "document",
 	  "localStorage",
+	  "sessionStorage",
 	  "module",
 	  "global" // Node.js
 	];
@@ -26453,6 +27275,7 @@ function requireJavascript () {
 	Category: common, scripting, web
 	Website: https://developer.mozilla.org/en-US/docs/Web/JavaScript
 	*/
+
 
 	/** @type LanguageFn */
 	function javascript(hljs) {
@@ -26494,7 +27317,8 @@ function requireJavascript () {
 	        nextChar === "<" ||
 	        // the , gives away that this is not HTML
 	        // `<T, A extends keyof T, V>`
-	        nextChar === ",") {
+	        nextChar === ","
+	        ) {
 	        response.ignoreMatch();
 	        return;
 	      }
@@ -26512,10 +27336,18 @@ function requireJavascript () {
 	      // `<blah />` (self-closing)
 	      // handled by simpleSelfClosing rule
 
+	      let m;
+	      const afterMatch = match.input.substring(afterMatchIndex);
+
+	      // some more template typing stuff
+	      //  <T = any>(key?: string) => Modify<
+	      if ((m = afterMatch.match(/^\s*=/))) {
+	        response.ignoreMatch();
+	        return;
+	      }
+
 	      // `<From extends string>`
 	      // technically this could be HTML, but it smells like a type
-	      let m;
-	      const afterMatch = match.input.substr(afterMatchIndex);
 	      // NOTE: This is ugh, but added specifically for https://github.com/highlightjs/highlight.js/issues/3276
 	      if ((m = afterMatch.match(/^\s+extends\s+/))) {
 	        if (m.index === 0) {
@@ -26571,7 +27403,7 @@ function requireJavascript () {
 	    contains: [] // defined later
 	  };
 	  const HTML_TEMPLATE = {
-	    begin: 'html`',
+	    begin: '\.?html`',
 	    end: '',
 	    starts: {
 	      end: '`',
@@ -26584,7 +27416,7 @@ function requireJavascript () {
 	    }
 	  };
 	  const CSS_TEMPLATE = {
-	    begin: 'css`',
+	    begin: '\.?css`',
 	    end: '',
 	    starts: {
 	      end: '`',
@@ -26594,6 +27426,19 @@ function requireJavascript () {
 	        SUBST
 	      ],
 	      subLanguage: 'css'
+	    }
+	  };
+	  const GRAPHQL_TEMPLATE = {
+	    begin: '\.?gql`',
+	    end: '',
+	    starts: {
+	      end: '`',
+	      returnEnd: false,
+	      contains: [
+	        hljs.BACKSLASH_ESCAPE,
+	        SUBST
+	      ],
+	      subLanguage: 'graphql'
 	    }
 	  };
 	  const TEMPLATE_STRING = {
@@ -26657,7 +27502,10 @@ function requireJavascript () {
 	    hljs.QUOTE_STRING_MODE,
 	    HTML_TEMPLATE,
 	    CSS_TEMPLATE,
+	    GRAPHQL_TEMPLATE,
 	    TEMPLATE_STRING,
+	    // Skip numbers when they are part of a variable name
+	    { match: /\$\d+/ },
 	    NUMBER,
 	    // This is intentional:
 	    // See https://github.com/highlightjs/highlight.js/issues/3288
@@ -26678,7 +27526,7 @@ function requireJavascript () {
 	  const PARAMS_CONTAINS = SUBST_AND_COMMENTS.concat([
 	    // eat recursive parens in sub expressions
 	    {
-	      begin: /\(/,
+	      begin: /(\s*)\(/,
 	      end: /\)/,
 	      keywords: KEYWORDS$1,
 	      contains: ["self"].concat(SUBST_AND_COMMENTS)
@@ -26686,7 +27534,8 @@ function requireJavascript () {
 	  ]);
 	  const PARAMS = {
 	    className: 'params',
-	    begin: /\(/,
+	    // convert this to negative lookbehind in v12
+	    begin: /(\s*)\(/, // to match the parms with 
 	    end: /\)/,
 	    excludeBegin: true,
 	    excludeEnd: true,
@@ -26807,9 +27656,10 @@ function requireJavascript () {
 	      /\b/,
 	      noneOf([
 	        ...BUILT_IN_GLOBALS,
-	        "super"
-	      ]),
-	      IDENT_RE$1, regex.lookahead(/\(/)),
+	        "super",
+	        "import"
+	      ].map(x => `${x}\\s*\\(`)),
+	      IDENT_RE$1, regex.lookahead(/\s*\(/)),
 	    className: "title.function",
 	    relevance: 0
 	  };
@@ -26871,7 +27721,7 @@ function requireJavascript () {
 	  };
 
 	  return {
-	    name: 'Javascript',
+	    name: 'JavaScript',
 	    aliases: ['js', 'jsx', 'mjs', 'cjs'],
 	    keywords: KEYWORDS$1,
 	    // this will be extended by TypeScript
@@ -26888,8 +27738,11 @@ function requireJavascript () {
 	      hljs.QUOTE_STRING_MODE,
 	      HTML_TEMPLATE,
 	      CSS_TEMPLATE,
+	      GRAPHQL_TEMPLATE,
 	      TEMPLATE_STRING,
 	      COMMENT,
+	      // Skip numbers when they are part of a variable name
+	      { match: /\$\d+/ },
 	      NUMBER,
 	      CLASS_REFERENCE,
 	      {
@@ -26927,7 +27780,7 @@ function requireJavascript () {
 	                    skip: true
 	                  },
 	                  {
-	                    begin: /\(/,
+	                    begin: /(\s*)\(/,
 	                    end: /\)/,
 	                    excludeBegin: true,
 	                    excludeEnd: true,
@@ -27125,24 +27978,32 @@ function requireJson () {
 	    className: "punctuation",
 	    relevance: 0
 	  };
-	  // normally we would rely on `keywords` for this but using a mode here allows us
-	  // to use the very tight `illegal: \S` rule later to flag any other character
-	  // as illegal indicating that despite looking like JSON we do not truly have
-	  // JSON and thus improve false-positively greatly since JSON will try and claim
-	  // all sorts of JSON looking stuff
-	  const LITERALS = { beginKeywords: [
+	  const LITERALS = [
 	    "true",
 	    "false",
 	    "null"
-	  ].join(" ") };
+	  ];
+	  // NOTE: normally we would rely on `keywords` for this but using a mode here allows us
+	  // - to use the very tight `illegal: \S` rule later to flag any other character
+	  // - as illegal indicating that despite looking like JSON we do not truly have
+	  // - JSON and thus improve false-positively greatly since JSON will try and claim
+	  // - all sorts of JSON looking stuff
+	  const LITERALS_MODE = {
+	    scope: "literal",
+	    beginKeywords: LITERALS.join(" "),
+	  };
 
 	  return {
 	    name: 'JSON',
+	    aliases: ['jsonc'],
+	    keywords:{
+	      literal: LITERALS,
+	    },
 	    contains: [
 	      ATTRIBUTE,
 	      PUNCTUATION,
 	      hljs.QUOTE_STRING_MODE,
-	      LITERALS,
+	      LITERALS_MODE,
 	      hljs.C_NUMBER_MODE,
 	      hljs.C_LINE_COMMENT_MODE,
 	      hljs.C_BLOCK_COMMENT_MODE
@@ -27161,6 +28022,7 @@ Description: Julia is a high-level, high-performance, dynamic programming langua
 Author: Kenta Sato <bicycle1885@gmail.com>
 Contributors: Alex Arslan <ararslan@comcast.net>, Fredrik Ekre <ekrefredrik@gmail.com>
 Website: https://julialang.org
+Category: scientific
 */
 
 var julia_1;
@@ -27611,6 +28473,7 @@ Description: Julia REPL sessions
 Author: Morten Piibeleht <morten.piibeleht@gmail.com>
 Website: https://julialang.org
 Requires: julia.js
+Category: scientific
 
 The Julia REPL code blocks look something like the following:
 
@@ -27713,6 +28576,7 @@ function requireKotlin () {
 	 Category: common
 	 */
 
+
 	function kotlin(hljs) {
 	  const KEYWORDS = {
 	    keyword:
@@ -27797,7 +28661,10 @@ function requireKotlin () {
 	      {
 	        begin: /\(/,
 	        end: /\)/,
-	        contains: [ hljs.inherit(STRING, { className: 'string' }) ]
+	        contains: [
+	          hljs.inherit(STRING, { className: 'string' }),
+	          "self"
+	        ]
 	      }
 	    ]
 	  };
@@ -27905,8 +28772,15 @@ function requireKotlin () {
 	        ]
 	      },
 	      {
-	        className: 'class',
-	        beginKeywords: 'class interface trait', // remove 'trait' when removed from KEYWORDS
+	        begin: [
+	          /class|interface|trait/,
+	          /\s+/,
+	          hljs.UNDERSCORE_IDENT_RE
+	        ],
+	        beginScope: {
+	          3: "title.class"
+	        },
+	        keywords: 'class interface trait',
 	        end: /[:\{(]|$/,
 	        excludeEnd: true,
 	        illegal: 'extends implements',
@@ -27924,7 +28798,7 @@ function requireKotlin () {
 	          {
 	            className: 'type',
 	            begin: /[,:]\s*/,
-	            end: /[<\(,]|$/,
+	            end: /[<\(,){\s]|$/,
 	            excludeBegin: true,
 	            returnEnd: true
 	          },
@@ -27953,6 +28827,7 @@ Language: Lasso
 Author: Eric Knibbe <eric@lassosoft.com>
 Description: Lasso is a language and server platform for database-driven web applications. This definition handles Lasso 9 syntax and LassoScript for Lasso 8.6 and earlier.
 Website: http://www.lassosoft.com/What-Is-Lasso
+Category: database, web
 */
 
 var lasso_1;
@@ -28456,8 +29331,9 @@ function requireLdif () {
 
 /*
 Language: Leaf
-Author: Hale Chan <halechan@qq.com>
-Description: Based on the Leaf reference from https://vapor.github.io/documentation/guide/leaf.html.
+Description: A Swift-based templating language created for the Vapor project.
+Website: https://docs.vapor.codes/leaf/overview
+Category: template
 */
 
 var leaf_1;
@@ -28467,43 +29343,90 @@ function requireLeaf () {
 	if (hasRequiredLeaf) return leaf_1;
 	hasRequiredLeaf = 1;
 	function leaf(hljs) {
+	  const IDENT = /([A-Za-z_][A-Za-z_0-9]*)?/;
+	  const LITERALS = [
+	    'true',
+	    'false',
+	    'in'
+	  ];
+	  const PARAMS = {
+	    scope: 'params',
+	    begin: /\(/,
+	    end: /\)(?=\:?)/,
+	    endsParent: true,
+	    relevance: 7,
+	    contains: [
+	      {
+	        scope: 'string',
+	        begin: '"',
+	        end: '"'
+	      },
+	      {
+	        scope: 'keyword',
+	        match: LITERALS.join("|"),
+	      },
+	      {
+	        scope: 'variable',
+	        match: /[A-Za-z_][A-Za-z_0-9]*/
+	      },
+	      {
+	        scope: 'operator',
+	        match: /\+|\-|\*|\/|\%|\=\=|\=|\!|\>|\<|\&\&|\|\|/
+	      }
+	    ]
+	  };
+	  const INSIDE_DISPATCH = {
+	    match: [
+	      IDENT,
+	      /(?=\()/,
+	    ],
+	    scope: {
+	      1: "keyword"
+	    },
+	    contains: [ PARAMS ]
+	  };
+	  PARAMS.contains.unshift(INSIDE_DISPATCH);
 	  return {
 	    name: 'Leaf',
 	    contains: [
+	      // #ident():
 	      {
-	        className: 'function',
-	        begin: '#+' + '[A-Za-z_0-9]*' + '\\(',
-	        end: / \{/,
-	        returnBegin: true,
-	        excludeEnd: true,
+	        match: [
+	          /#+/,
+	          IDENT,
+	          /(?=\()/,
+	        ],
+	        scope: {
+	          1: "punctuation",
+	          2: "keyword"
+	        },
+	        // will start up after the ending `)` match from line ~44
+	        // just to grab the trailing `:` if we can match it
+	        starts: {
+	          contains: [
+	            {
+	              match: /\:/,
+	              scope: "punctuation"
+	            }
+	          ]
+	        },
 	        contains: [
-	          {
-	            className: 'keyword',
-	            begin: '#+'
-	          },
-	          {
-	            className: 'title',
-	            begin: '[A-Za-z_][A-Za-z_0-9]*'
-	          },
-	          {
-	            className: 'params',
-	            begin: '\\(',
-	            end: '\\)',
-	            endsParent: true,
-	            contains: [
-	              {
-	                className: 'string',
-	                begin: '"',
-	                end: '"'
-	              },
-	              {
-	                className: 'variable',
-	                begin: '[A-Za-z_][A-Za-z_0-9]*'
-	              }
-	            ]
-	          }
-	        ]
-	      }
+	          PARAMS
+	        ],
+	      },
+	      // #ident or #ident:
+	      {
+	        match: [
+	          /#+/,
+	          IDENT,
+	          /:?/,
+	        ],
+	        scope: {
+	          1: "punctuation",
+	          2: "keyword",
+	          3: "punctuation"
+	        }
+	      },
 	    ]
 	  };
 	}
@@ -28558,12 +29481,12 @@ function requireLess () {
 	    },
 	    CSS_VARIABLE: {
 	      className: "attr",
-	      begin: /--[A-Za-z][A-Za-z0-9_-]*/
+	      begin: /--[A-Za-z_][A-Za-z0-9_-]*/
 	    }
 	  };
 	};
 
-	const TAGS = [
+	const HTML_TAGS = [
 	  'a',
 	  'abbr',
 	  'address',
@@ -28615,11 +29538,16 @@ function requireLess () {
 	  'nav',
 	  'object',
 	  'ol',
+	  'optgroup',
+	  'option',
 	  'p',
+	  'picture',
 	  'q',
 	  'quote',
 	  'samp',
 	  'section',
+	  'select',
+	  'source',
 	  'span',
 	  'strong',
 	  'summary',
@@ -28637,6 +29565,58 @@ function requireLess () {
 	  'var',
 	  'video'
 	];
+
+	const SVG_TAGS = [
+	  'defs',
+	  'g',
+	  'marker',
+	  'mask',
+	  'pattern',
+	  'svg',
+	  'switch',
+	  'symbol',
+	  'feBlend',
+	  'feColorMatrix',
+	  'feComponentTransfer',
+	  'feComposite',
+	  'feConvolveMatrix',
+	  'feDiffuseLighting',
+	  'feDisplacementMap',
+	  'feFlood',
+	  'feGaussianBlur',
+	  'feImage',
+	  'feMerge',
+	  'feMorphology',
+	  'feOffset',
+	  'feSpecularLighting',
+	  'feTile',
+	  'feTurbulence',
+	  'linearGradient',
+	  'radialGradient',
+	  'stop',
+	  'circle',
+	  'ellipse',
+	  'image',
+	  'line',
+	  'path',
+	  'polygon',
+	  'polyline',
+	  'rect',
+	  'text',
+	  'use',
+	  'textPath',
+	  'tspan',
+	  'foreignObject',
+	  'clipPath'
+	];
+
+	const TAGS = [
+	  ...HTML_TAGS,
+	  ...SVG_TAGS,
+	];
+
+	// Sorting, then reversing makes sure longer attributes/elements like
+	// `font-weight` are matched fully instead of getting false positives on say `font`
 
 	const MEDIA_FEATURES = [
 	  'any-hover',
@@ -28673,7 +29653,7 @@ function requireLess () {
 	  'max-width',
 	  'min-height',
 	  'max-height'
-	];
+	].sort().reverse();
 
 	// https://developer.mozilla.org/en-US/docs/Web/CSS/Pseudo-classes
 	const PSEUDO_CLASSES = [
@@ -28736,7 +29716,7 @@ function requireLess () {
 	  'valid',
 	  'visited',
 	  'where' // where()
-	];
+	].sort().reverse();
 
 	// https://developer.mozilla.org/en-US/docs/Web/CSS/Pseudo-elements
 	const PSEUDO_ELEMENTS = [
@@ -28754,12 +29734,14 @@ function requireLess () {
 	  'selection',
 	  'slotted',
 	  'spelling-error'
-	];
+	].sort().reverse();
 
 	const ATTRIBUTES = [
+	  'accent-color',
 	  'align-content',
 	  'align-items',
 	  'align-self',
+	  'alignment-baseline',
 	  'all',
 	  'animation',
 	  'animation-delay',
@@ -28770,6 +29752,7 @@ function requireLess () {
 	  'animation-name',
 	  'animation-play-state',
 	  'animation-timing-function',
+	  'appearance',
 	  'backface-visibility',
 	  'background',
 	  'background-attachment',
@@ -28781,6 +29764,7 @@ function requireLess () {
 	  'background-position',
 	  'background-repeat',
 	  'background-size',
+	  'baseline-shift',
 	  'block-size',
 	  'border',
 	  'border-block',
@@ -28827,10 +29811,14 @@ function requireLess () {
 	  'border-left-width',
 	  'border-radius',
 	  'border-right',
+	  'border-end-end-radius',
+	  'border-end-start-radius',
 	  'border-right-color',
 	  'border-right-style',
 	  'border-right-width',
 	  'border-spacing',
+	  'border-start-end-radius',
+	  'border-start-start-radius',
 	  'border-style',
 	  'border-top',
 	  'border-top-color',
@@ -28846,6 +29834,8 @@ function requireLess () {
 	  'break-after',
 	  'break-before',
 	  'break-inside',
+	  'cx',
+	  'cy',
 	  'caption-side',
 	  'caret-color',
 	  'clear',
@@ -28853,6 +29843,11 @@ function requireLess () {
 	  'clip-path',
 	  'clip-rule',
 	  'color',
+	  'color-interpolation',
+	  'color-interpolation-filters',
+	  'color-profile',
+	  'color-rendering',
+	  'color-scheme',
 	  'column-count',
 	  'column-fill',
 	  'column-gap',
@@ -28874,7 +29869,12 @@ function requireLess () {
 	  'cursor',
 	  'direction',
 	  'display',
+	  'dominant-baseline',
 	  'empty-cells',
+	  'enable-background',
+	  'fill',
+	  'fill-opacity',
+	  'fill-rule',
 	  'filter',
 	  'flex',
 	  'flex-basis',
@@ -28885,6 +29885,8 @@ function requireLess () {
 	  'flex-wrap',
 	  'float',
 	  'flow',
+	  'flood-color',
+	  'flood-opacity',
 	  'font',
 	  'font-display',
 	  'font-family',
@@ -28906,6 +29908,7 @@ function requireLess () {
 	  'font-variation-settings',
 	  'font-weight',
 	  'gap',
+	  'glyph-orientation-horizontal',
 	  'glyph-orientation-vertical',
 	  'grid',
 	  'grid-area',
@@ -28932,16 +29935,32 @@ function requireLess () {
 	  'image-resolution',
 	  'ime-mode',
 	  'inline-size',
+	  'inset',
+	  'inset-block',
+	  'inset-block-end',
+	  'inset-block-start',
+	  'inset-inline',
+	  'inset-inline-end',
+	  'inset-inline-start',
 	  'isolation',
+	  'kerning',
 	  'justify-content',
+	  'justify-items',
+	  'justify-self',
 	  'left',
 	  'letter-spacing',
+	  'lighting-color',
 	  'line-break',
 	  'line-height',
 	  'list-style',
 	  'list-style-image',
 	  'list-style-position',
 	  'list-style-type',
+	  'marker',
+	  'marker-end',
+	  'marker-mid',
+	  'marker-start',
+	  'mask',
 	  'margin',
 	  'margin-block',
 	  'margin-block-end',
@@ -29023,12 +30042,15 @@ function requireLess () {
 	  'pointer-events',
 	  'position',
 	  'quotes',
+	  'r',
 	  'resize',
 	  'rest',
 	  'rest-after',
 	  'rest-before',
 	  'right',
+	  'rotate',
 	  'row-gap',
+	  'scale',
 	  'scroll-margin',
 	  'scroll-margin-block',
 	  'scroll-margin-block-end',
@@ -29060,11 +30082,23 @@ function requireLess () {
 	  'shape-image-threshold',
 	  'shape-margin',
 	  'shape-outside',
+	  'shape-rendering',
+	  'stop-color',
+	  'stop-opacity',
+	  'stroke',
+	  'stroke-dasharray',
+	  'stroke-dashoffset',
+	  'stroke-linecap',
+	  'stroke-linejoin',
+	  'stroke-miterlimit',
+	  'stroke-opacity',
+	  'stroke-width',
 	  'speak',
 	  'speak-as',
 	  'src', // @font-face
 	  'tab-size',
 	  'table-layout',
+	  'text-anchor',
 	  'text-align',
 	  'text-align-all',
 	  'text-align-last',
@@ -29072,7 +30106,9 @@ function requireLess () {
 	  'text-decoration',
 	  'text-decoration-color',
 	  'text-decoration-line',
+	  'text-decoration-skip-ink',
 	  'text-decoration-style',
+	  'text-decoration-thickness',
 	  'text-emphasis',
 	  'text-emphasis-color',
 	  'text-emphasis-position',
@@ -29084,6 +30120,7 @@ function requireLess () {
 	  'text-rendering',
 	  'text-shadow',
 	  'text-transform',
+	  'text-underline-offset',
 	  'text-underline-position',
 	  'top',
 	  'transform',
@@ -29095,7 +30132,9 @@ function requireLess () {
 	  'transition-duration',
 	  'transition-property',
 	  'transition-timing-function',
+	  'translate',
 	  'unicode-bidi',
+	  'vector-effect',
 	  'vertical-align',
 	  'visibility',
 	  'voice-balance',
@@ -29114,13 +30153,13 @@ function requireLess () {
 	  'word-spacing',
 	  'word-wrap',
 	  'writing-mode',
+	  'x',
+	  'y',
 	  'z-index'
-	  // reverse makes sure longer attributes `font-weight` are matched fully
-	  // instead of getting false positives on say `font`
-	].reverse();
+	].sort().reverse();
 
 	// some grammars use them all as a single group
-	const PSEUDO_SELECTORS = PSEUDO_CLASSES.concat(PSEUDO_ELEMENTS);
+	const PSEUDO_SELECTORS = PSEUDO_CLASSES.concat(PSEUDO_ELEMENTS).sort().reverse();
 
 	/*
 	Language: Less
@@ -29129,6 +30168,7 @@ function requireLess () {
 	Website: http://lesscss.org
 	Category: common, css, web
 	*/
+
 
 	/** @type LanguageFn */
 	function less(hljs) {
@@ -29201,7 +30241,9 @@ function requireLess () {
 	      returnBegin: true,
 	      excludeEnd: true
 	    },
-	    modes.IMPORTANT
+	    modes.IMPORTANT,
+	    { beginKeywords: 'and not' },
+	    modes.FUNCTION_DISPATCH
 	  );
 
 	  const VALUE_WITH_RULESETS = VALUE_MODES.concat({
@@ -29297,6 +30339,7 @@ function requireLess () {
 	      MIXIN_GUARD_MODE,
 	      IDENT_MODE('keyword', 'all\\b'),
 	      IDENT_MODE('variable', '@\\{' + IDENT_RE + '\\}'), // otherwise it’s identified as tag
+	      
 	      {
 	        begin: '\\b(' + TAGS.join('|') + ')\\b',
 	        className: 'selector-tag'
@@ -29339,7 +30382,9 @@ function requireLess () {
 	    VAR_RULE_MODE,
 	    PSEUDO_SELECTOR_MODE,
 	    RULE_MODE,
-	    SELECTOR_MODE
+	    SELECTOR_MODE,
+	    MIXIN_GUARD_MODE,
+	    modes.FUNCTION_DISPATCH
 	  );
 
 	  return {
@@ -29844,6 +30889,7 @@ function requireLivescript () {
 	Category: scripting
 	*/
 
+
 	function livescript(hljs) {
 	  const LIVESCRIPT_BUILT_INS = [
 	    'npm',
@@ -30141,44 +31187,47 @@ function requireLlvm () {
 	  return {
 	    name: 'LLVM IR',
 	    // TODO: split into different categories of keywords
-	    keywords:
-	      'begin end true false declare define global '
-	      + 'constant private linker_private internal '
-	      + 'available_externally linkonce linkonce_odr weak '
-	      + 'weak_odr appending dllimport dllexport common '
-	      + 'default hidden protected extern_weak external '
-	      + 'thread_local zeroinitializer undef null to tail '
-	      + 'target triple datalayout volatile nuw nsw nnan '
-	      + 'ninf nsz arcp fast exact inbounds align '
-	      + 'addrspace section alias module asm sideeffect '
-	      + 'gc dbg linker_private_weak attributes blockaddress '
-	      + 'initialexec localdynamic localexec prefix unnamed_addr '
-	      + 'ccc fastcc coldcc x86_stdcallcc x86_fastcallcc '
-	      + 'arm_apcscc arm_aapcscc arm_aapcs_vfpcc ptx_device '
-	      + 'ptx_kernel intel_ocl_bicc msp430_intrcc spir_func '
-	      + 'spir_kernel x86_64_sysvcc x86_64_win64cc x86_thiscallcc '
-	      + 'cc c signext zeroext inreg sret nounwind '
-	      + 'noreturn noalias nocapture byval nest readnone '
-	      + 'readonly inlinehint noinline alwaysinline optsize ssp '
-	      + 'sspreq noredzone noimplicitfloat naked builtin cold '
-	      + 'nobuiltin noduplicate nonlazybind optnone returns_twice '
-	      + 'sanitize_address sanitize_memory sanitize_thread sspstrong '
-	      + 'uwtable returned type opaque eq ne slt sgt '
-	      + 'sle sge ult ugt ule uge oeq one olt ogt '
-	      + 'ole oge ord uno ueq une x acq_rel acquire '
-	      + 'alignstack atomic catch cleanup filter inteldialect '
-	      + 'max min monotonic nand personality release seq_cst '
-	      + 'singlethread umax umin unordered xchg add fadd '
-	      + 'sub fsub mul fmul udiv sdiv fdiv urem srem '
-	      + 'frem shl lshr ashr and or xor icmp fcmp '
-	      + 'phi call trunc zext sext fptrunc fpext uitofp '
-	      + 'sitofp fptoui fptosi inttoptr ptrtoint bitcast '
-	      + 'addrspacecast select va_arg ret br switch invoke '
-	      + 'unwind unreachable indirectbr landingpad resume '
-	      + 'malloc alloca free load store getelementptr '
-	      + 'extractelement insertelement shufflevector getresult '
-	      + 'extractvalue insertvalue atomicrmw cmpxchg fence '
-	      + 'argmemonly double',
+	    keywords: {
+	      keyword: 'begin end true false declare define global '
+	        + 'constant private linker_private internal '
+	        + 'available_externally linkonce linkonce_odr weak '
+	        + 'weak_odr appending dllimport dllexport common '
+	        + 'default hidden protected extern_weak external '
+	        + 'thread_local zeroinitializer undef null to tail '
+	        + 'target triple datalayout volatile nuw nsw nnan '
+	        + 'ninf nsz arcp fast exact inbounds align '
+	        + 'addrspace section alias module asm sideeffect '
+	        + 'gc dbg linker_private_weak attributes blockaddress '
+	        + 'initialexec localdynamic localexec prefix unnamed_addr '
+	        + 'ccc fastcc coldcc x86_stdcallcc x86_fastcallcc '
+	        + 'arm_apcscc arm_aapcscc arm_aapcs_vfpcc ptx_device '
+	        + 'ptx_kernel intel_ocl_bicc msp430_intrcc spir_func '
+	        + 'spir_kernel x86_64_sysvcc x86_64_win64cc x86_thiscallcc '
+	        + 'cc c signext zeroext inreg sret nounwind '
+	        + 'noreturn noalias nocapture byval nest readnone '
+	        + 'readonly inlinehint noinline alwaysinline optsize ssp '
+	        + 'sspreq noredzone noimplicitfloat naked builtin cold '
+	        + 'nobuiltin noduplicate nonlazybind optnone returns_twice '
+	        + 'sanitize_address sanitize_memory sanitize_thread sspstrong '
+	        + 'uwtable returned type opaque eq ne slt sgt '
+	        + 'sle sge ult ugt ule uge oeq one olt ogt '
+	        + 'ole oge ord uno ueq une x acq_rel acquire '
+	        + 'alignstack atomic catch cleanup filter inteldialect '
+	        + 'max min monotonic nand personality release seq_cst '
+	        + 'singlethread umax umin unordered xchg add fadd '
+	        + 'sub fsub mul fmul udiv sdiv fdiv urem srem '
+	        + 'frem shl lshr ashr and or xor icmp fcmp '
+	        + 'phi call trunc zext sext fptrunc fpext uitofp '
+	        + 'sitofp fptoui fptosi inttoptr ptrtoint bitcast '
+	        + 'addrspacecast select va_arg ret br switch invoke '
+	        + 'unwind unreachable indirectbr landingpad resume '
+	        + 'malloc alloca free load store getelementptr '
+	        + 'extractelement insertelement shufflevector getresult '
+	        + 'extractvalue insertvalue atomicrmw cmpxchg fence '
+	        + 'argmemonly',
+	      type: 'void half bfloat float double fp128 x86_fp80 ppc_fp128 '
+	        + 'x86_amx x86_mmx ptr label token metadata opaque'
+	    },
 	    contains: [
 	      TYPE,
 	      // this matches "empty comments"...
@@ -30300,7 +31349,7 @@ function requireLsl () {
 Language: Lua
 Description: Lua is a powerful, efficient, lightweight, embeddable scripting language.
 Author: Andrew Fedorov <dmmdrs@mail.ru>
-Category: common, scripting
+Category: common, gaming, scripting
 Website: https://www.lua.org
 */
 
@@ -30390,7 +31439,7 @@ Language: Makefile
 Author: Ivan Sagalaev <maniac@softwaremaniacs.org>
 Contributors: Joël Porquet <joel@porquet.org>
 Website: https://www.gnu.org/software/make/manual/html_node/Introduction.html
-Category: common
+Category: common, build-system
 */
 
 var makefile_1;
@@ -30513,6 +31562,14 @@ function requireMathematica () {
 	  "Accumulate",
 	  "Accuracy",
 	  "AccuracyGoal",
+	  "AcousticAbsorbingValue",
+	  "AcousticImpedanceValue",
+	  "AcousticNormalVelocityValue",
+	  "AcousticPDEComponent",
+	  "AcousticPressureCondition",
+	  "AcousticRadiationValue",
+	  "AcousticSoundHardValue",
+	  "AcousticSoundSoftCondition",
 	  "ActionDelay",
 	  "ActionMenu",
 	  "ActionMenuBox",
@@ -30535,6 +31592,7 @@ function requireMathematica () {
 	  "AdjacencyList",
 	  "AdjacencyMatrix",
 	  "AdjacentMeshCells",
+	  "Adjugate",
 	  "AdjustmentBox",
 	  "AdjustmentBoxOptions",
 	  "AdjustTimeSeriesForecast",
@@ -30549,6 +31607,7 @@ function requireMathematica () {
 	  "AircraftData",
 	  "AirportData",
 	  "AirPressureData",
+	  "AirSoundAttenuation",
 	  "AirTemperatureData",
 	  "AiryAi",
 	  "AiryAiPrime",
@@ -30571,6 +31630,7 @@ function requireMathematica () {
 	  "AlignmentPoint",
 	  "All",
 	  "AllowAdultContent",
+	  "AllowChatServices",
 	  "AllowedCloudExtraParameters",
 	  "AllowedCloudParameterExtensions",
 	  "AllowedDimensions",
@@ -30615,6 +31675,7 @@ function requireMathematica () {
 	  "AngleVector",
 	  "AngularGauge",
 	  "Animate",
+	  "AnimatedImage",
 	  "AnimationCycleOffset",
 	  "AnimationCycleRepetitions",
 	  "AnimationDirection",
@@ -30624,6 +31685,7 @@ function requireMathematica () {
 	  "AnimationRunning",
 	  "AnimationRunTime",
 	  "AnimationTimeIndex",
+	  "AnimationVideo",
 	  "Animator",
 	  "AnimatorBox",
 	  "AnimatorBoxOptions",
@@ -30642,6 +31704,7 @@ function requireMathematica () {
 	  "AnomalyDetectorFunction",
 	  "Anonymous",
 	  "Antialiasing",
+	  "Antihermitian",
 	  "AntihermitianMatrixQ",
 	  "Antisymmetric",
 	  "AntisymmetricMatrixQ",
@@ -30660,8 +31723,11 @@ function requireMathematica () {
 	  "AppendCheck",
 	  "AppendLayer",
 	  "AppendTo",
+	  "Application",
 	  "Apply",
+	  "ApplyReaction",
 	  "ApplySides",
+	  "ApplyTo",
 	  "ArcCos",
 	  "ArcCosh",
 	  "ArcCot",
@@ -30683,6 +31749,7 @@ function requireMathematica () {
 	  "ArgMax",
 	  "ArgMin",
 	  "ArgumentCountQ",
+	  "ArgumentsOptions",
 	  "ARIMAProcess",
 	  "ArithmeticGeometricMean",
 	  "ARMAProcess",
@@ -30697,7 +31764,9 @@ function requireMathematica () {
 	  "ArrayMesh",
 	  "ArrayPad",
 	  "ArrayPlot",
+	  "ArrayPlot3D",
 	  "ArrayQ",
+	  "ArrayReduce",
 	  "ArrayResample",
 	  "ArrayReshape",
 	  "ArrayRules",
@@ -30719,6 +31788,8 @@ function requireMathematica () {
 	  "AspectRatio",
 	  "AspectRatioFixed",
 	  "Assert",
+	  "AssessmentFunction",
+	  "AssessmentResultObject",
 	  "AssociateTo",
 	  "Association",
 	  "AssociationFormat",
@@ -30728,17 +31799,33 @@ function requireMathematica () {
 	  "AssumeDeterministic",
 	  "Assuming",
 	  "Assumptions",
+	  "AstroAngularSeparation",
+	  "AstroBackground",
+	  "AstroCenter",
+	  "AstroDistance",
+	  "AstroGraphics",
+	  "AstroGridLines",
+	  "AstroGridLinesStyle",
 	  "AstronomicalData",
+	  "AstroPosition",
+	  "AstroProjection",
+	  "AstroRange",
+	  "AstroRangePadding",
+	  "AstroReferenceFrame",
+	  "AstroStyling",
+	  "AstroZoomLevel",
 	  "Asymptotic",
 	  "AsymptoticDSolveValue",
 	  "AsymptoticEqual",
 	  "AsymptoticEquivalent",
+	  "AsymptoticExpectation",
 	  "AsymptoticGreater",
 	  "AsymptoticGreaterEqual",
 	  "AsymptoticIntegrate",
 	  "AsymptoticLess",
 	  "AsymptoticLessEqual",
 	  "AsymptoticOutputTracker",
+	  "AsymptoticProbability",
 	  "AsymptoticProduct",
 	  "AsymptoticRSolveValue",
 	  "AsymptoticSolve",
@@ -30750,8 +31837,12 @@ function requireMathematica () {
 	  "AtomCoordinates",
 	  "AtomCount",
 	  "AtomDiagramCoordinates",
+	  "AtomLabels",
+	  "AtomLabelStyle",
 	  "AtomList",
 	  "AtomQ",
+	  "AttachCell",
+	  "AttachedCell",
 	  "AttentionLayer",
 	  "Attributes",
 	  "Audio",
@@ -30810,7 +31901,8 @@ function requireMathematica () {
 	  "AudioStream",
 	  "AudioStreams",
 	  "AudioTimeStretch",
-	  "AudioTracks",
+	  "AudioTrackApply",
+	  "AudioTrackSelection",
 	  "AudioTrim",
 	  "AudioType",
 	  "AugmentedPolyhedron",
@@ -30837,6 +31929,7 @@ function requireMathematica () {
 	  "AutoNumberFormatting",
 	  "AutoOpenNotebooks",
 	  "AutoOpenPalettes",
+	  "AutoOperatorRenderings",
 	  "AutoQuoteCharacters",
 	  "AutoRefreshed",
 	  "AutoRemove",
@@ -30854,8 +31947,22 @@ function requireMathematica () {
 	  "AxesStyle",
 	  "AxiomaticTheory",
 	  "Axis",
+	  "Axis3DBox",
+	  "Axis3DBoxOptions",
+	  "AxisBox",
+	  "AxisBoxOptions",
+	  "AxisLabel",
+	  "AxisObject",
+	  "AxisStyle",
 	  "BabyMonsterGroupB",
 	  "Back",
+	  "BackFaceColor",
+	  "BackFaceGlowColor",
+	  "BackFaceOpacity",
+	  "BackFaceSpecularColor",
+	  "BackFaceSpecularExponent",
+	  "BackFaceSurfaceAppearance",
+	  "BackFaceTexture",
 	  "Background",
 	  "BackgroundAppearance",
 	  "BackgroundTasksSettings",
@@ -30900,7 +32007,6 @@ function requireMathematica () {
 	  "Before",
 	  "Begin",
 	  "BeginDialogPacket",
-	  "BeginFrontEndInteractionPacket",
 	  "BeginPackage",
 	  "BellB",
 	  "BellY",
@@ -30914,6 +32020,7 @@ function requireMathematica () {
 	  "BernoulliGraphDistribution",
 	  "BernoulliProcess",
 	  "BernsteinBasis",
+	  "BesagL",
 	  "BesselFilterModel",
 	  "BesselI",
 	  "BesselJ",
@@ -30929,6 +32036,7 @@ function requireMathematica () {
 	  "BetaRegularized",
 	  "Between",
 	  "BetweennessCentrality",
+	  "Beveled",
 	  "BeveledPolyhedron",
 	  "BezierCurve",
 	  "BezierCurve3DBox",
@@ -30937,6 +32045,8 @@ function requireMathematica () {
 	  "BezierCurveBoxOptions",
 	  "BezierFunction",
 	  "BilateralFilter",
+	  "BilateralLaplaceTransform",
+	  "BilateralZTransform",
 	  "Binarize",
 	  "BinaryDeserialize",
 	  "BinaryDistance",
@@ -30948,11 +32058,23 @@ function requireMathematica () {
 	  "BinaryWrite",
 	  "BinCounts",
 	  "BinLists",
+	  "BinnedVariogramList",
 	  "Binomial",
 	  "BinomialDistribution",
+	  "BinomialPointProcess",
 	  "BinomialProcess",
 	  "BinormalDistribution",
 	  "BiorthogonalSplineWavelet",
+	  "BioSequence",
+	  "BioSequenceBackTranslateList",
+	  "BioSequenceComplement",
+	  "BioSequenceInstances",
+	  "BioSequenceModify",
+	  "BioSequencePlot",
+	  "BioSequenceQ",
+	  "BioSequenceReverseComplement",
+	  "BioSequenceTranscribe",
+	  "BioSequenceTranslate",
 	  "BipartiteGraphQ",
 	  "BiquadraticFilterModel",
 	  "BirnbaumImportance",
@@ -30963,6 +32085,7 @@ function requireMathematica () {
 	  "BitLength",
 	  "BitNot",
 	  "BitOr",
+	  "BitRate",
 	  "BitSet",
 	  "BitShiftLeft",
 	  "BitShiftRight",
@@ -30992,17 +32115,23 @@ function requireMathematica () {
 	  "BlockchainTransactionData",
 	  "BlockchainTransactionSign",
 	  "BlockchainTransactionSubmit",
+	  "BlockDiagonalMatrix",
+	  "BlockLowerTriangularMatrix",
 	  "BlockMap",
 	  "BlockRandom",
+	  "BlockUpperTriangularMatrix",
 	  "BlomqvistBeta",
 	  "BlomqvistBetaTest",
 	  "Blue",
 	  "Blur",
+	  "Blurring",
 	  "BodePlot",
 	  "BohmanWindow",
 	  "Bold",
 	  "Bond",
 	  "BondCount",
+	  "BondLabels",
+	  "BondLabelStyle",
 	  "BondList",
 	  "BondQ",
 	  "Bookmarks",
@@ -31079,6 +32208,8 @@ function requireMathematica () {
 	  "BubbleChart3D",
 	  "BubbleScale",
 	  "BubbleSizes",
+	  "BuckyballGraph",
+	  "BuildCompiledComponent",
 	  "BuildingData",
 	  "BulletGauge",
 	  "BusinessDayQ",
@@ -31105,6 +32236,7 @@ function requireMathematica () {
 	  "Byte",
 	  "ByteArray",
 	  "ByteArrayFormat",
+	  "ByteArrayFormatQ",
 	  "ByteArrayQ",
 	  "ByteArrayToString",
 	  "ByteCount",
@@ -31127,25 +32259,37 @@ function requireMathematica () {
 	  "CanonicalGraph",
 	  "CanonicalizePolygon",
 	  "CanonicalizePolyhedron",
+	  "CanonicalizeRegion",
 	  "CanonicalName",
 	  "CanonicalWarpingCorrespondence",
 	  "CanonicalWarpingDistance",
 	  "CantorMesh",
 	  "CantorStaircase",
+	  "Canvas",
 	  "Cap",
 	  "CapForm",
 	  "CapitalDifferentialD",
 	  "Capitalize",
 	  "CapsuleShape",
 	  "CaptureRunning",
+	  "CaputoD",
 	  "CardinalBSplineBasis",
 	  "CarlemanLinearize",
+	  "CarlsonRC",
+	  "CarlsonRD",
+	  "CarlsonRE",
+	  "CarlsonRF",
+	  "CarlsonRG",
+	  "CarlsonRJ",
+	  "CarlsonRK",
+	  "CarlsonRM",
 	  "CarmichaelLambda",
 	  "CaseOrdering",
 	  "Cases",
 	  "CaseSensitive",
 	  "Cashflow",
 	  "Casoratian",
+	  "Cast",
 	  "Catalan",
 	  "CatalanNumber",
 	  "Catch",
@@ -31153,6 +32297,8 @@ function requireMathematica () {
 	  "Catenate",
 	  "CatenateLayer",
 	  "CauchyDistribution",
+	  "CauchyMatrix",
+	  "CauchyPointProcess",
 	  "CauchyWindow",
 	  "CayleyGraph",
 	  "CDF",
@@ -31170,6 +32316,7 @@ function requireMathematica () {
 	  "CellContents",
 	  "CellContext",
 	  "CellDingbat",
+	  "CellDingbatMargin",
 	  "CellDynamicExpression",
 	  "CellEditDuplicate",
 	  "CellElementsBoundingBox",
@@ -31184,12 +32331,14 @@ function requireMathematica () {
 	  "CellFrameLabelMargins",
 	  "CellFrameLabels",
 	  "CellFrameMargins",
+	  "CellFrameStyle",
 	  "CellGroup",
 	  "CellGroupData",
 	  "CellGrouping",
 	  "CellGroupingRules",
 	  "CellHorizontalScrolling",
 	  "CellID",
+	  "CellInsertionPointCell",
 	  "CellLabel",
 	  "CellLabelAutoDelete",
 	  "CellLabelMargins",
@@ -31205,12 +32354,15 @@ function requireMathematica () {
 	  "CellSize",
 	  "CellStyle",
 	  "CellTags",
+	  "CellTrayPosition",
+	  "CellTrayWidgets",
 	  "CellularAutomaton",
 	  "CensoredDistribution",
 	  "Censoring",
 	  "Center",
 	  "CenterArray",
 	  "CenterDot",
+	  "CenteredInterval",
 	  "CentralFeature",
 	  "CentralMoment",
 	  "CentralMomentGeneratingFunction",
@@ -31261,11 +32413,16 @@ function requireMathematica () {
 	  "Check",
 	  "CheckAbort",
 	  "CheckAll",
+	  "CheckArguments",
 	  "Checkbox",
 	  "CheckboxBar",
 	  "CheckboxBox",
 	  "CheckboxBoxOptions",
+	  "ChemicalConvert",
 	  "ChemicalData",
+	  "ChemicalFormula",
+	  "ChemicalInstance",
+	  "ChemicalReaction",
 	  "ChessboardDistance",
 	  "ChiDistribution",
 	  "ChineseRemainder",
@@ -31286,6 +32443,7 @@ function requireMathematica () {
 	  "CircleThrough",
 	  "CircleTimes",
 	  "CirculantGraph",
+	  "CircularArcThrough",
 	  "CircularOrthogonalMatrixDistribution",
 	  "CircularQuaternionMatrixDistribution",
 	  "CircularRealMatrixDistribution",
@@ -31307,6 +32465,8 @@ function requireMathematica () {
 	  "ClearSystemCache",
 	  "ClebschGordan",
 	  "ClickPane",
+	  "ClickToCopy",
+	  "ClickToCopyEnabled",
 	  "Clip",
 	  "ClipboardNotebook",
 	  "ClipFill",
@@ -31324,7 +32484,6 @@ function requireMathematica () {
 	  "Closing",
 	  "ClosingAutoSave",
 	  "ClosingEvent",
-	  "ClosingSaveDialog",
 	  "CloudAccountData",
 	  "CloudBase",
 	  "CloudConnect",
@@ -31358,6 +32517,7 @@ function requireMathematica () {
 	  "ClusterClassify",
 	  "ClusterDissimilarityFunction",
 	  "ClusteringComponents",
+	  "ClusteringMeasurements",
 	  "ClusteringTree",
 	  "CMYKColor",
 	  "Coarse",
@@ -31369,6 +32529,7 @@ function requireMathematica () {
 	  "CoefficientRules",
 	  "CoifletWavelet",
 	  "Collect",
+	  "CollinearPoints",
 	  "Colon",
 	  "ColonForm",
 	  "ColorBalance",
@@ -31380,6 +32541,7 @@ function requireMathematica () {
 	  "ColorDetect",
 	  "ColorDistance",
 	  "ColorFunction",
+	  "ColorFunctionBinning",
 	  "ColorFunctionScaling",
 	  "Colorize",
 	  "ColorNegate",
@@ -31406,6 +32568,13 @@ function requireMathematica () {
 	  "ColumnsEqual",
 	  "ColumnSpacings",
 	  "ColumnWidths",
+	  "CombinatorB",
+	  "CombinatorC",
+	  "CombinatorI",
+	  "CombinatorK",
+	  "CombinatorS",
+	  "CombinatorW",
+	  "CombinatorY",
 	  "CombinedEntityClass",
 	  "CombinerFunction",
 	  "CometData",
@@ -31425,15 +32594,25 @@ function requireMathematica () {
 	  "Compile",
 	  "Compiled",
 	  "CompiledCodeFunction",
+	  "CompiledComponent",
+	  "CompiledExpressionDeclaration",
 	  "CompiledFunction",
+	  "CompiledLayer",
+	  "CompilerCallback",
+	  "CompilerEnvironment",
+	  "CompilerEnvironmentAppend",
+	  "CompilerEnvironmentAppendTo",
+	  "CompilerEnvironmentObject",
 	  "CompilerOptions",
 	  "Complement",
 	  "ComplementedEntityClass",
 	  "CompleteGraph",
 	  "CompleteGraphQ",
+	  "CompleteIntegral",
 	  "CompleteKaryTree",
 	  "CompletionsListPacket",
 	  "Complex",
+	  "ComplexArrayPlot",
 	  "ComplexContourPlot",
 	  "Complexes",
 	  "ComplexExpand",
@@ -31461,6 +32640,7 @@ function requireMathematica () {
 	  "CompressedData",
 	  "CompressionLevel",
 	  "ComputeUncertainty",
+	  "ConcaveHullMesh",
 	  "Condition",
 	  "ConditionalExpression",
 	  "Conditioned",
@@ -31470,12 +32650,21 @@ function requireMathematica () {
 	  "ConfidenceRange",
 	  "ConfidenceTransform",
 	  "ConfigurationPath",
+	  "Confirm",
+	  "ConfirmAssert",
+	  "ConfirmBy",
+	  "ConfirmMatch",
+	  "ConfirmQuiet",
+	  "ConformationMethod",
 	  "ConformAudio",
 	  "ConformImages",
 	  "Congruent",
+	  "ConicGradientFilling",
 	  "ConicHullRegion",
 	  "ConicHullRegion3DBox",
+	  "ConicHullRegion3DBoxOptions",
 	  "ConicHullRegionBox",
+	  "ConicHullRegionBoxOptions",
 	  "ConicOptimization",
 	  "Conjugate",
 	  "ConjugateTranspose",
@@ -31490,10 +32679,11 @@ function requireMathematica () {
 	  "ConnectionSettings",
 	  "ConnectLibraryCallbackFunction",
 	  "ConnectSystemModelComponents",
+	  "ConnectSystemModelController",
 	  "ConnesWindow",
 	  "ConoverTest",
+	  "ConservativeConvectionPDETerm",
 	  "ConsoleMessage",
-	  "ConsoleMessagePacket",
 	  "Constant",
 	  "ConstantArray",
 	  "ConstantArrayLayer",
@@ -31512,6 +32702,7 @@ function requireMathematica () {
 	  "ContainsExactly",
 	  "ContainsNone",
 	  "ContainsOnly",
+	  "ContentDetectorFunction",
 	  "ContentFieldOptions",
 	  "ContentLocationFunction",
 	  "ContentObject",
@@ -31565,15 +32756,18 @@ function requireMathematica () {
 	  "ControlPlacement",
 	  "ControlsRendering",
 	  "ControlType",
+	  "ConvectionPDETerm",
 	  "Convergents",
 	  "ConversionOptions",
 	  "ConversionRules",
-	  "ConvertToBitmapPacket",
 	  "ConvertToPostScript",
 	  "ConvertToPostScriptPacket",
 	  "ConvexHullMesh",
+	  "ConvexHullRegion",
+	  "ConvexOptimization",
 	  "ConvexPolygonQ",
 	  "ConvexPolyhedronQ",
+	  "ConvexRegionQ",
 	  "ConvolutionLayer",
 	  "Convolve",
 	  "ConwayGroupCo1",
@@ -31589,6 +32783,7 @@ function requireMathematica () {
 	  "CoordinatesToolOptions",
 	  "CoordinateTransform",
 	  "CoordinateTransformData",
+	  "CoplanarPoints",
 	  "CoprimeQ",
 	  "Coproduct",
 	  "CopulaDistribution",
@@ -31596,8 +32791,10 @@ function requireMathematica () {
 	  "CopyDatabin",
 	  "CopyDirectory",
 	  "CopyFile",
+	  "CopyFunction",
 	  "CopyTag",
 	  "CopyToClipboard",
+	  "CoreNilpotentDecomposition",
 	  "CornerFilter",
 	  "CornerNeighbors",
 	  "Correlation",
@@ -31612,6 +32809,10 @@ function requireMathematica () {
 	  "CosIntegral",
 	  "Cot",
 	  "Coth",
+	  "CoulombF",
+	  "CoulombG",
+	  "CoulombH1",
+	  "CoulombH2",
 	  "Count",
 	  "CountDistinct",
 	  "CountDistinctBy",
@@ -31640,6 +32841,7 @@ function requireMathematica () {
 	  "CreateCellID",
 	  "CreateChannel",
 	  "CreateCloudExpression",
+	  "CreateCompilerEnvironment",
 	  "CreateDatabin",
 	  "CreateDataStructure",
 	  "CreateDataSystemModel",
@@ -31648,16 +32850,17 @@ function requireMathematica () {
 	  "CreateDocument",
 	  "CreateFile",
 	  "CreateIntermediateDirectories",
+	  "CreateLicenseEntitlement",
 	  "CreateManagedLibraryExpression",
 	  "CreateNotebook",
 	  "CreatePacletArchive",
 	  "CreatePalette",
-	  "CreatePalettePacket",
 	  "CreatePermissionsGroup",
 	  "CreateScheduledTask",
 	  "CreateSearchIndex",
 	  "CreateSystemModel",
 	  "CreateTemporary",
+	  "CreateTypeInstance",
 	  "CreateUUID",
 	  "CreateWindow",
 	  "CriterionFunction",
@@ -31672,14 +32875,19 @@ function requireMathematica () {
 	  "CrossMatrix",
 	  "Csc",
 	  "Csch",
+	  "CSGRegion",
+	  "CSGRegionQ",
+	  "CSGRegionTree",
 	  "CTCLossLayer",
 	  "Cube",
 	  "CubeRoot",
 	  "Cubics",
 	  "Cuboid",
 	  "CuboidBox",
+	  "CuboidBoxOptions",
 	  "Cumulant",
 	  "CumulantGeneratingFunction",
+	  "CumulativeFeatureImpactPlot",
 	  "Cup",
 	  "CupCap",
 	  "Curl",
@@ -31688,7 +32896,6 @@ function requireMathematica () {
 	  "CurrencyConvert",
 	  "CurrentDate",
 	  "CurrentImage",
-	  "CurrentlySpeakingPacket",
 	  "CurrentNotebookImage",
 	  "CurrentScreenImage",
 	  "CurrentValue",
@@ -31704,7 +32911,9 @@ function requireMathematica () {
 	  "Cyclotomic",
 	  "Cylinder",
 	  "CylinderBox",
+	  "CylinderBoxOptions",
 	  "CylindricalDecomposition",
+	  "CylindricalDecompositionFunction",
 	  "D",
 	  "DagumDistribution",
 	  "DamData",
@@ -31720,6 +32929,7 @@ function requireMathematica () {
 	  "DatabinAdd",
 	  "DatabinRemove",
 	  "Databins",
+	  "DatabinSubmit",
 	  "DatabinUpload",
 	  "DataCompression",
 	  "DataDistribution",
@@ -31727,6 +32937,7 @@ function requireMathematica () {
 	  "DataReversed",
 	  "Dataset",
 	  "DatasetDisplayPanel",
+	  "DatasetTheme",
 	  "DataStructure",
 	  "DataStructureQ",
 	  "Date",
@@ -31737,6 +32948,7 @@ function requireMathematica () {
 	  "DatedUnit",
 	  "DateFormat",
 	  "DateFunction",
+	  "DateGranularity",
 	  "DateHistogram",
 	  "DateInterval",
 	  "DateList",
@@ -31750,6 +32962,8 @@ function requireMathematica () {
 	  "DatePlus",
 	  "DateRange",
 	  "DateReduction",
+	  "DateScale",
+	  "DateSelect",
 	  "DateString",
 	  "DateTicksFormat",
 	  "DateValue",
@@ -31774,6 +32988,7 @@ function requireMathematica () {
 	  "Decapitalize",
 	  "Decimal",
 	  "DecimalForm",
+	  "DeclareCompiledComponent",
 	  "DeclareKnownSymbols",
 	  "DeclarePackage",
 	  "Decompose",
@@ -31784,12 +32999,16 @@ function requireMathematica () {
 	  "DedekindEta",
 	  "DeepSpaceProbeData",
 	  "Default",
+	  "Default2DTool",
+	  "Default3DTool",
+	  "DefaultAttachedCellStyle",
 	  "DefaultAxesStyle",
 	  "DefaultBaseStyle",
 	  "DefaultBoxStyle",
 	  "DefaultButton",
 	  "DefaultColor",
 	  "DefaultControlPlacement",
+	  "DefaultDockedCellStyle",
 	  "DefaultDuplicateCellStyle",
 	  "DefaultDuration",
 	  "DefaultElement",
@@ -31798,7 +33017,6 @@ function requireMathematica () {
 	  "DefaultFont",
 	  "DefaultFontProperties",
 	  "DefaultFormatType",
-	  "DefaultFormatTypeForStyle",
 	  "DefaultFrameStyle",
 	  "DefaultFrameTicksStyle",
 	  "DefaultGridLinesStyle",
@@ -31840,6 +33058,7 @@ function requireMathematica () {
 	  "Delayed",
 	  "Deletable",
 	  "Delete",
+	  "DeleteAdjacentDuplicates",
 	  "DeleteAnomalies",
 	  "DeleteBorderComponents",
 	  "DeleteCases",
@@ -31849,6 +33068,7 @@ function requireMathematica () {
 	  "DeleteDirectory",
 	  "DeleteDuplicates",
 	  "DeleteDuplicatesBy",
+	  "DeleteElements",
 	  "DeleteFile",
 	  "DeleteMissing",
 	  "DeleteObject",
@@ -31861,6 +33081,7 @@ function requireMathematica () {
 	  "DelimitedArray",
 	  "DelimitedSequence",
 	  "Delimiter",
+	  "DelimiterAutoMatching",
 	  "DelimiterFlashTime",
 	  "DelimiterMatching",
 	  "Delimiters",
@@ -31878,6 +33099,7 @@ function requireMathematica () {
 	  "DepthFirstScan",
 	  "Derivative",
 	  "DerivativeFilter",
+	  "DerivativePDETerm",
 	  "DerivedKey",
 	  "DescriptorStateSpace",
 	  "DesignMatrix",
@@ -31928,6 +33150,9 @@ function requireMathematica () {
 	  "DifferentialRoot",
 	  "DifferentialRootReduce",
 	  "DifferentiatorFilter",
+	  "DiffusionPDETerm",
+	  "DiggleGatesPointProcess",
+	  "DiggleGrattonPointProcess",
 	  "DigitalSignature",
 	  "DigitBlock",
 	  "DigitBlockMinimum",
@@ -31951,6 +33176,7 @@ function requireMathematica () {
 	  "DirectedGraphQ",
 	  "DirectedInfinity",
 	  "Direction",
+	  "DirectionalLight",
 	  "Directive",
 	  "Directory",
 	  "DirectoryName",
@@ -31974,6 +33200,7 @@ function requireMathematica () {
 	  "DiscreteDelta",
 	  "DiscreteHadamardTransform",
 	  "DiscreteIndicator",
+	  "DiscreteInputOutputModel",
 	  "DiscreteLimit",
 	  "DiscreteLQEstimatorGains",
 	  "DiscreteLQRegulatorGains",
@@ -31999,6 +33226,7 @@ function requireMathematica () {
 	  "Disjunction",
 	  "Disk",
 	  "DiskBox",
+	  "DiskBoxOptions",
 	  "DiskMatrix",
 	  "DiskSegment",
 	  "Dispatch",
@@ -32007,12 +33235,10 @@ function requireMathematica () {
 	  "Display",
 	  "DisplayAllSteps",
 	  "DisplayEndPacket",
-	  "DisplayFlushImagePacket",
 	  "DisplayForm",
 	  "DisplayFunction",
 	  "DisplayPacket",
 	  "DisplayRules",
-	  "DisplaySetSizePacket",
 	  "DisplayString",
 	  "DisplayTemporary",
 	  "DisplayWith",
@@ -32044,6 +33270,7 @@ function requireMathematica () {
 	  "DMSList",
 	  "DMSString",
 	  "Do",
+	  "DockedCell",
 	  "DockedCells",
 	  "DocumentGenerator",
 	  "DocumentGeneratorInformation",
@@ -32054,6 +33281,8 @@ function requireMathematica () {
 	  "Dodecahedron",
 	  "DomainRegistrationInformation",
 	  "DominantColors",
+	  "DominatorTreeGraph",
+	  "DominatorVertexList",
 	  "DOSTextFormat",
 	  "Dot",
 	  "DotDashed",
@@ -32091,16 +33320,22 @@ function requireMathematica () {
 	  "DownTee",
 	  "DownTeeArrow",
 	  "DownValues",
+	  "DownValuesFunction",
 	  "DragAndDrop",
+	  "DrawBackFaces",
 	  "DrawEdges",
 	  "DrawFrontFaces",
 	  "DrawHighlighted",
+	  "DrazinInverse",
 	  "Drop",
 	  "DropoutLayer",
+	  "DropShadowing",
 	  "DSolve",
+	  "DSolveChangeVariables",
 	  "DSolveValue",
 	  "Dt",
 	  "DualLinearProgramming",
+	  "DualPlanarGraph",
 	  "DualPolyhedron",
 	  "DualSystemsModel",
 	  "DumpGet",
@@ -32132,12 +33367,16 @@ function requireMathematica () {
 	  "EarthquakeData",
 	  "EccentricityCentrality",
 	  "Echo",
+	  "EchoEvaluation",
 	  "EchoFunction",
+	  "EchoLabel",
+	  "EchoTiming",
 	  "EclipseType",
 	  "EdgeAdd",
 	  "EdgeBetweennessCentrality",
 	  "EdgeCapacity",
 	  "EdgeCapForm",
+	  "EdgeChromaticNumber",
 	  "EdgeColor",
 	  "EdgeConnectivity",
 	  "EdgeContract",
@@ -32165,6 +33404,9 @@ function requireMathematica () {
 	  "EdgeTaggedGraphQ",
 	  "EdgeTags",
 	  "EdgeThickness",
+	  "EdgeTransitiveGraphQ",
+	  "EdgeValueRange",
+	  "EdgeValueSizes",
 	  "EdgeWeight",
 	  "EdgeWeightedGraphQ",
 	  "Editable",
@@ -32198,6 +33440,8 @@ function requireMathematica () {
 	  "EmbedCode",
 	  "EmbeddedHTML",
 	  "EmbeddedService",
+	  "EmbeddedSQLEntityClass",
+	  "EmbeddedSQLExpression",
 	  "EmbeddingLayer",
 	  "EmbeddingObject",
 	  "EmitSound",
@@ -32206,8 +33450,10 @@ function requireMathematica () {
 	  "Empty",
 	  "EmptyGraphQ",
 	  "EmptyRegion",
+	  "EmptySpaceF",
 	  "EnableConsolePrintPacket",
 	  "Enabled",
+	  "Enclose",
 	  "Encode",
 	  "Encrypt",
 	  "EncryptedObject",
@@ -32215,7 +33461,6 @@ function requireMathematica () {
 	  "End",
 	  "EndAdd",
 	  "EndDialogPacket",
-	  "EndFrontEndInteractionPacket",
 	  "EndOfBuffer",
 	  "EndOfFile",
 	  "EndOfLine",
@@ -32273,7 +33518,10 @@ function requireMathematica () {
 	  "EscapeRadius",
 	  "EstimatedBackground",
 	  "EstimatedDistribution",
+	  "EstimatedPointNormals",
+	  "EstimatedPointProcess",
 	  "EstimatedProcess",
+	  "EstimatedVariogramModel",
 	  "EstimatorGains",
 	  "EstimatorRegulator",
 	  "EuclideanDistance",
@@ -32300,6 +33548,8 @@ function requireMathematica () {
 	  "EvaluationNotebook",
 	  "EvaluationObject",
 	  "EvaluationOrder",
+	  "EvaluationPrivileges",
+	  "EvaluationRateLimit",
 	  "Evaluator",
 	  "EvaluatorNames",
 	  "EvenQ",
@@ -32314,6 +33564,7 @@ function requireMathematica () {
 	  "ExactRootIsolation",
 	  "ExampleData",
 	  "Except",
+	  "ExcludedContexts",
 	  "ExcludedForms",
 	  "ExcludedLines",
 	  "ExcludedPhysicalQuantities",
@@ -32356,6 +33607,7 @@ function requireMathematica () {
 	  "ExpressionCell",
 	  "ExpressionGraph",
 	  "ExpressionPacket",
+	  "ExpressionTree",
 	  "ExpressionUUID",
 	  "ExpToTrig",
 	  "ExtendedEntityClass",
@@ -32392,6 +33644,7 @@ function requireMathematica () {
 	  "FaceForm",
 	  "FaceGrids",
 	  "FaceGridsStyle",
+	  "FaceRecognize",
 	  "FacialFeatures",
 	  "Factor",
 	  "FactorComplete",
@@ -32419,11 +33672,14 @@ function requireMathematica () {
 	  "FeatureExtraction",
 	  "FeatureExtractor",
 	  "FeatureExtractorFunction",
+	  "FeatureImpactPlot",
 	  "FeatureNames",
 	  "FeatureNearest",
 	  "FeatureSpacePlot",
 	  "FeatureSpacePlot3D",
 	  "FeatureTypes",
+	  "FeatureValueDependencyPlot",
+	  "FeatureValueImpactPlot",
 	  "FEDisableConsolePrintPacket",
 	  "FeedbackLinearize",
 	  "FeedbackSector",
@@ -32446,6 +33702,8 @@ function requireMathematica () {
 	  "FileExistsQ",
 	  "FileExtension",
 	  "FileFormat",
+	  "FileFormatProperties",
+	  "FileFormatQ",
 	  "FileHandler",
 	  "FileHash",
 	  "FileInformation",
@@ -32459,16 +33717,20 @@ function requireMathematica () {
 	  "FileNameSetter",
 	  "FileNameSplit",
 	  "FileNameTake",
+	  "FileNameToFormatList",
 	  "FilePrint",
 	  "FileSize",
 	  "FileSystemMap",
 	  "FileSystemScan",
+	  "FileSystemTree",
 	  "FileTemplate",
 	  "FileTemplateApply",
 	  "FileType",
 	  "FilledCurve",
 	  "FilledCurveBox",
 	  "FilledCurveBoxOptions",
+	  "FilledTorus",
+	  "FillForm",
 	  "Filling",
 	  "FillingStyle",
 	  "FillingTransform",
@@ -32492,6 +33754,7 @@ function requireMathematica () {
 	  "FindDistribution",
 	  "FindDistributionParameters",
 	  "FindDivisions",
+	  "FindEdgeColoring",
 	  "FindEdgeCover",
 	  "FindEdgeCut",
 	  "FindEdgeIndependentPaths",
@@ -32518,6 +33781,8 @@ function requireMathematica () {
 	  "FindIndependentVertexSet",
 	  "FindInstance",
 	  "FindIntegerNullVector",
+	  "FindIsomers",
+	  "FindIsomorphicSubgraph",
 	  "FindKClan",
 	  "FindKClique",
 	  "FindKClub",
@@ -32539,8 +33804,11 @@ function requireMathematica () {
 	  "FindPath",
 	  "FindPeaks",
 	  "FindPermutation",
+	  "FindPlanarColoring",
+	  "FindPointProcessParameters",
 	  "FindPostmanTour",
 	  "FindProcessParameters",
+	  "FindRegionTransform",
 	  "FindRepeat",
 	  "FindRoot",
 	  "FindSequenceFunction",
@@ -32548,10 +33816,12 @@ function requireMathematica () {
 	  "FindShortestPath",
 	  "FindShortestTour",
 	  "FindSpanningTree",
+	  "FindSubgraphIsomorphism",
 	  "FindSystemModelEquilibrium",
 	  "FindTextualAnswer",
 	  "FindThreshold",
 	  "FindTransientRepeat",
+	  "FindVertexColoring",
 	  "FindVertexCover",
 	  "FindVertexCut",
 	  "FindVertexIndependentPaths",
@@ -32579,18 +33849,21 @@ function requireMathematica () {
 	  "FixedPointList",
 	  "FlashSelection",
 	  "Flat",
+	  "FlatShading",
 	  "Flatten",
 	  "FlattenAt",
 	  "FlattenLayer",
 	  "FlatTopWindow",
+	  "FlightData",
 	  "FlipView",
 	  "Floor",
 	  "FlowPolynomial",
-	  "FlushPrintOutputPacket",
 	  "Fold",
 	  "FoldList",
 	  "FoldPair",
 	  "FoldPairList",
+	  "FoldWhile",
+	  "FoldWhileList",
 	  "FollowRedirects",
 	  "Font",
 	  "FontColor",
@@ -32609,6 +33882,7 @@ function requireMathematica () {
 	  "FontWeight",
 	  "For",
 	  "ForAll",
+	  "ForAllType",
 	  "ForceVersionInstall",
 	  "Format",
 	  "FormatRules",
@@ -32622,12 +33896,14 @@ function requireMathematica () {
 	  "FormLayoutFunction",
 	  "FormObject",
 	  "FormPage",
+	  "FormProtectionMethod",
 	  "FormTheme",
 	  "FormulaData",
 	  "FormulaLookup",
 	  "FortranForm",
 	  "Forward",
 	  "ForwardBackward",
+	  "ForwardCloudCredentials",
 	  "Fourier",
 	  "FourierCoefficient",
 	  "FourierCosCoefficient",
@@ -32647,7 +33923,10 @@ function requireMathematica () {
 	  "FourierSinTransform",
 	  "FourierTransform",
 	  "FourierTrigSeries",
+	  "FoxH",
+	  "FoxHReduce",
 	  "FractionalBrownianMotionProcess",
+	  "FractionalD",
 	  "FractionalGaussianNoiseProcess",
 	  "FractionalPart",
 	  "FractionBox",
@@ -32660,6 +33939,7 @@ function requireMathematica () {
 	  "FrameInset",
 	  "FrameLabel",
 	  "Frameless",
+	  "FrameListVideo",
 	  "FrameMargins",
 	  "FrameRate",
 	  "FrameStyle",
@@ -32682,12 +33962,14 @@ function requireMathematica () {
 	  "FromCoefficientRules",
 	  "FromContinuedFraction",
 	  "FromDate",
+	  "FromDateString",
 	  "FromDigits",
 	  "FromDMS",
 	  "FromEntity",
 	  "FromJulianDate",
 	  "FromLetterNumber",
 	  "FromPolarCoordinates",
+	  "FromRawPointer",
 	  "FromRomanNumeral",
 	  "FromSphericalCoordinates",
 	  "FromUnixTime",
@@ -32704,7 +33986,12 @@ function requireMathematica () {
 	  "FrontEndValueCache",
 	  "FrontEndVersion",
 	  "FrontFaceColor",
+	  "FrontFaceGlowColor",
 	  "FrontFaceOpacity",
+	  "FrontFaceSpecularColor",
+	  "FrontFaceSpecularExponent",
+	  "FrontFaceSurfaceAppearance",
+	  "FrontFaceTexture",
 	  "Full",
 	  "FullAxes",
 	  "FullDefinition",
@@ -32715,17 +34002,31 @@ function requireMathematica () {
 	  "FullRegion",
 	  "FullSimplify",
 	  "Function",
+	  "FunctionAnalytic",
+	  "FunctionBijective",
 	  "FunctionCompile",
 	  "FunctionCompileExport",
 	  "FunctionCompileExportByteArray",
 	  "FunctionCompileExportLibrary",
 	  "FunctionCompileExportString",
+	  "FunctionContinuous",
+	  "FunctionConvexity",
+	  "FunctionDeclaration",
+	  "FunctionDiscontinuities",
 	  "FunctionDomain",
 	  "FunctionExpand",
+	  "FunctionInjective",
 	  "FunctionInterpolation",
+	  "FunctionLayer",
+	  "FunctionMeromorphic",
+	  "FunctionMonotonicity",
 	  "FunctionPeriod",
+	  "FunctionPoles",
 	  "FunctionRange",
+	  "FunctionSign",
+	  "FunctionSingularities",
 	  "FunctionSpace",
+	  "FunctionSurjective",
 	  "FussellVeselyImportance",
 	  "GaborFilter",
 	  "GaborMatrix",
@@ -32763,7 +34064,10 @@ function requireMathematica () {
 	  "GeneralizedLinearModelFit",
 	  "GenerateAsymmetricKeyPair",
 	  "GenerateConditions",
+	  "GeneratedAssetFormat",
+	  "GeneratedAssetLocation",
 	  "GeneratedCell",
+	  "GeneratedCellStyles",
 	  "GeneratedDocumentBinding",
 	  "GenerateDerivedKey",
 	  "GenerateDigitalSignature",
@@ -32786,9 +34090,11 @@ function requireMathematica () {
 	  "GeoArea",
 	  "GeoArraySize",
 	  "GeoBackground",
+	  "GeoBoundary",
 	  "GeoBoundingBox",
 	  "GeoBounds",
 	  "GeoBoundsRegion",
+	  "GeoBoundsRegionBoundary",
 	  "GeoBubbleChart",
 	  "GeoCenter",
 	  "GeoCircle",
@@ -32798,6 +34104,7 @@ function requireMathematica () {
 	  "GeodesicDilation",
 	  "GeodesicErosion",
 	  "GeodesicOpening",
+	  "GeodesicPolyhedron",
 	  "GeoDestination",
 	  "GeodesyData",
 	  "GeoDirection",
@@ -32808,6 +34115,8 @@ function requireMathematica () {
 	  "GeoElevationData",
 	  "GeoEntities",
 	  "GeoGraphics",
+	  "GeoGraphPlot",
+	  "GeoGraphValuePlot",
 	  "GeogravityModelData",
 	  "GeoGridDirectionDifference",
 	  "GeoGridLines",
@@ -32838,6 +34147,9 @@ function requireMathematica () {
 	  "GeometricMeanFilter",
 	  "GeometricOptimization",
 	  "GeometricScene",
+	  "GeometricStep",
+	  "GeometricStylingRules",
+	  "GeometricTest",
 	  "GeometricTransformation",
 	  "GeometricTransformation3DBox",
 	  "GeometricTransformation3DBoxOptions",
@@ -32845,7 +34157,9 @@ function requireMathematica () {
 	  "GeometricTransformationBoxOptions",
 	  "GeoModel",
 	  "GeoNearest",
+	  "GeoOrientationData",
 	  "GeoPath",
+	  "GeoPolygon",
 	  "GeoPosition",
 	  "GeoPositionENU",
 	  "GeoPositionXYZ",
@@ -32873,14 +34187,11 @@ function requireMathematica () {
 	  "GestureHandler",
 	  "GestureHandlerTag",
 	  "Get",
-	  "GetBoundingBoxSizePacket",
 	  "GetContext",
 	  "GetEnvironment",
 	  "GetFileName",
-	  "GetFrontEndOptionsDataPacket",
 	  "GetLinebreakInformationPacket",
-	  "GetMenusPacket",
-	  "GetPageBreakInformationPacket",
+	  "GibbsPointProcess",
 	  "Glaisher",
 	  "GlobalClusteringCoefficient",
 	  "GlobalPreferences",
@@ -32893,9 +34204,11 @@ function requireMathematica () {
 	  "GoodmanKruskalGamma",
 	  "GoodmanKruskalGammaTest",
 	  "Goto",
+	  "GouraudShading",
 	  "Grad",
 	  "Gradient",
 	  "GradientFilter",
+	  "GradientFittedMesh",
 	  "GradientOrientationFilter",
 	  "GrammarApply",
 	  "GrammarRules",
@@ -32913,7 +34226,6 @@ function requireMathematica () {
 	  "GraphDisjointUnion",
 	  "GraphDistance",
 	  "GraphDistanceMatrix",
-	  "GraphElementData",
 	  "GraphEmbedding",
 	  "GraphHighlight",
 	  "GraphHighlightStyle",
@@ -32948,18 +34260,25 @@ function requireMathematica () {
 	  "GraphicsSpacing",
 	  "GraphicsStyle",
 	  "GraphIntersection",
+	  "GraphJoin",
+	  "GraphLayerLabels",
+	  "GraphLayers",
+	  "GraphLayerStyle",
 	  "GraphLayout",
 	  "GraphLinkEfficiency",
 	  "GraphPeriphery",
 	  "GraphPlot",
 	  "GraphPlot3D",
 	  "GraphPower",
+	  "GraphProduct",
 	  "GraphPropertyDistribution",
 	  "GraphQ",
 	  "GraphRadius",
 	  "GraphReciprocity",
 	  "GraphRoot",
 	  "GraphStyle",
+	  "GraphSum",
+	  "GraphTree",
 	  "GraphUnion",
 	  "Gray",
 	  "GrayLevel",
@@ -32973,6 +34292,7 @@ function requireMathematica () {
 	  "GreaterSlantEqual",
 	  "GreaterThan",
 	  "GreaterTilde",
+	  "GreekStyle",
 	  "Green",
 	  "GreenFunction",
 	  "Grid",
@@ -32994,6 +34314,7 @@ function requireMathematica () {
 	  "GridGraph",
 	  "GridLines",
 	  "GridLinesStyle",
+	  "GridVideo",
 	  "GroebnerBasis",
 	  "GroupActionBase",
 	  "GroupBy",
@@ -33006,6 +34327,8 @@ function requireMathematica () {
 	  "GroupGenerators",
 	  "Groupings",
 	  "GroupMultiplicationTable",
+	  "GroupOpenerColor",
+	  "GroupOpenerInsideFrame",
 	  "GroupOrbits",
 	  "GroupOrder",
 	  "GroupPageBreakWithin",
@@ -33038,6 +34361,7 @@ function requireMathematica () {
 	  "HannWindow",
 	  "HaradaNortonGroupHN",
 	  "HararyGraph",
+	  "HardcorePointProcess",
 	  "HarmonicMean",
 	  "HarmonicMeanFilter",
 	  "HarmonicNumber",
@@ -33052,20 +34376,32 @@ function requireMathematica () {
 	  "HeaderBackground",
 	  "HeaderDisplayFunction",
 	  "HeaderLines",
+	  "Headers",
 	  "HeaderSize",
 	  "HeaderStyle",
 	  "Heads",
+	  "HeatFluxValue",
+	  "HeatInsulationValue",
+	  "HeatOutflowValue",
+	  "HeatRadiationValue",
+	  "HeatSymmetryValue",
+	  "HeatTemperatureCondition",
+	  "HeatTransferPDEComponent",
+	  "HeatTransferValue",
 	  "HeavisideLambda",
 	  "HeavisidePi",
 	  "HeavisideTheta",
 	  "HeldGroupHe",
 	  "HeldPart",
+	  "HelmholtzPDEComponent",
 	  "HelpBrowserLookup",
 	  "HelpBrowserNotebook",
 	  "HelpBrowserSettings",
+	  "HelpViewerSettings",
 	  "Here",
 	  "HermiteDecomposition",
 	  "HermiteH",
+	  "Hermitian",
 	  "HermitianMatrixQ",
 	  "HessenbergDecomposition",
 	  "Hessian",
@@ -33090,6 +34426,7 @@ function requireMathematica () {
 	  "HighlightGraph",
 	  "HighlightImage",
 	  "HighlightMesh",
+	  "HighlightString",
 	  "HighpassFilter",
 	  "HigmanSimsGroupHS",
 	  "HilbertCurve",
@@ -33099,6 +34436,7 @@ function requireMathematica () {
 	  "Histogram3D",
 	  "HistogramDistribution",
 	  "HistogramList",
+	  "HistogramPointDensity",
 	  "HistogramTransform",
 	  "HistogramTransformInterpolation",
 	  "HistoricalPeriodData",
@@ -33170,10 +34508,13 @@ function requireMathematica () {
 	  "Identity",
 	  "IdentityMatrix",
 	  "If",
+	  "IfCompiled",
 	  "IgnoreCase",
 	  "IgnoreDiacritics",
+	  "IgnoreIsotopes",
 	  "IgnorePunctuation",
 	  "IgnoreSpellCheck",
+	  "IgnoreStereochemistry",
 	  "IgnoringInactive",
 	  "Im",
 	  "Image",
@@ -33215,6 +34556,7 @@ function requireMathematica () {
 	  "ImageDimensions",
 	  "ImageDisplacements",
 	  "ImageDistance",
+	  "ImageEditMode",
 	  "ImageEffect",
 	  "ImageExposureCombine",
 	  "ImageFeatureTrack",
@@ -33269,6 +34611,7 @@ function requireMathematica () {
 	  "ImageSizeCache",
 	  "ImageSizeMultipliers",
 	  "ImageSizeRaw",
+	  "ImageStitch",
 	  "ImageSubtract",
 	  "ImageTake",
 	  "ImageTransformation",
@@ -33276,23 +34619,29 @@ function requireMathematica () {
 	  "ImageType",
 	  "ImageValue",
 	  "ImageValuePositions",
+	  "ImageVectorscopePlot",
+	  "ImageWaveformPlot",
 	  "ImagingDevice",
+	  "ImplicitD",
 	  "ImplicitRegion",
 	  "Implies",
 	  "Import",
 	  "ImportAutoReplacements",
 	  "ImportByteArray",
+	  "ImportedObject",
 	  "ImportOptions",
 	  "ImportString",
 	  "ImprovementImportance",
 	  "In",
 	  "Inactivate",
 	  "Inactive",
+	  "InactiveStyle",
 	  "IncidenceGraph",
 	  "IncidenceList",
 	  "IncidenceMatrix",
 	  "IncludeAromaticBonds",
 	  "IncludeConstantBasis",
+	  "IncludedContexts",
 	  "IncludeDefinitions",
 	  "IncludeDirectories",
 	  "IncludeFileExtension",
@@ -33303,6 +34652,7 @@ function requireMathematica () {
 	  "IncludePods",
 	  "IncludeQuantities",
 	  "IncludeRelatedTables",
+	  "IncludeSingularSolutions",
 	  "IncludeSingularTerm",
 	  "IncludeWindowTimes",
 	  "Increment",
@@ -33324,10 +34674,13 @@ function requireMathematica () {
 	  "IndexGraph",
 	  "IndexTag",
 	  "Inequality",
+	  "InertEvaluate",
+	  "InertExpression",
 	  "InexactNumberQ",
 	  "InexactNumbers",
 	  "InfiniteFuture",
 	  "InfiniteLine",
+	  "InfiniteLineThrough",
 	  "InfinitePast",
 	  "InfinitePlane",
 	  "Infinity",
@@ -33339,12 +34692,14 @@ function requireMathematica () {
 	  "InformationDataGrid",
 	  "Inherited",
 	  "InheritScope",
+	  "InhomogeneousPoissonPointProcess",
 	  "InhomogeneousPoissonProcess",
 	  "InitialEvaluationHistory",
 	  "Initialization",
 	  "InitializationCell",
 	  "InitializationCellEvaluation",
 	  "InitializationCellWarning",
+	  "InitializationObject",
 	  "InitializationObjects",
 	  "InitializationValue",
 	  "Initialize",
@@ -33368,6 +34723,7 @@ function requireMathematica () {
 	  "InputNamePacket",
 	  "InputNotebook",
 	  "InputPacket",
+	  "InputPorts",
 	  "InputSettings",
 	  "InputStream",
 	  "InputString",
@@ -33401,8 +34757,10 @@ function requireMathematica () {
 	  "IntegerString",
 	  "Integral",
 	  "Integrate",
+	  "IntegrateChangeVariables",
 	  "Interactive",
 	  "InteractiveTradingChart",
+	  "InterfaceSwitched",
 	  "Interlaced",
 	  "Interleaving",
 	  "InternallyBalancedDecomposition",
@@ -33434,6 +34792,8 @@ function requireMathematica () {
 	  "Into",
 	  "Inverse",
 	  "InverseBetaRegularized",
+	  "InverseBilateralLaplaceTransform",
+	  "InverseBilateralZTransform",
 	  "InverseCDF",
 	  "InverseChiSquareDistribution",
 	  "InverseContinuousWaveletTransform",
@@ -33489,6 +34849,7 @@ function requireMathematica () {
 	  "IslandData",
 	  "IsolatingInterval",
 	  "IsomorphicGraphQ",
+	  "IsomorphicSubgraphQ",
 	  "IsotopeData",
 	  "Italic",
 	  "Item",
@@ -33508,6 +34869,7 @@ function requireMathematica () {
 	  "JacobiDC",
 	  "JacobiDN",
 	  "JacobiDS",
+	  "JacobiEpsilon",
 	  "JacobiNC",
 	  "JacobiND",
 	  "JacobiNS",
@@ -33517,6 +34879,7 @@ function requireMathematica () {
 	  "JacobiSN",
 	  "JacobiSymbol",
 	  "JacobiZeta",
+	  "JacobiZN",
 	  "JankoGroupJ1",
 	  "JankoGroupJ2",
 	  "JankoGroupJ3",
@@ -33557,6 +34920,7 @@ function requireMathematica () {
 	  "KelvinKer",
 	  "KendallTau",
 	  "KendallTauTest",
+	  "KernelConfiguration",
 	  "KernelExecute",
 	  "KernelFunction",
 	  "KernelMixtureDistribution",
@@ -33615,6 +34979,12 @@ function requireMathematica () {
 	  "LakeData",
 	  "LambdaComponents",
 	  "LambertW",
+	  "LameC",
+	  "LameCPrime",
+	  "LameEigenvalueA",
+	  "LameEigenvalueB",
+	  "LameS",
+	  "LameSPrime",
 	  "LaminaData",
 	  "LanczosWindow",
 	  "LandauDistribution",
@@ -33628,6 +34998,7 @@ function requireMathematica () {
 	  "Laplacian",
 	  "LaplacianFilter",
 	  "LaplacianGaussianFilter",
+	  "LaplacianPDETerm",
 	  "Large",
 	  "Larger",
 	  "Last",
@@ -33638,12 +35009,14 @@ function requireMathematica () {
 	  "Launch",
 	  "LaunchKernels",
 	  "LayeredGraphPlot",
+	  "LayeredGraphPlot3D",
 	  "LayerSizeFunction",
 	  "LayoutInformation",
 	  "LCHColor",
 	  "LCM",
 	  "LeaderSize",
 	  "LeafCount",
+	  "LeapVariant",
 	  "LeapYearQ",
 	  "LearnDistribution",
 	  "LearnedDistribution",
@@ -33705,15 +35078,21 @@ function requireMathematica () {
 	  "LeviCivitaTensor",
 	  "LevyDistribution",
 	  "Lexicographic",
+	  "LexicographicOrder",
+	  "LexicographicSort",
 	  "LibraryDataType",
 	  "LibraryFunction",
+	  "LibraryFunctionDeclaration",
 	  "LibraryFunctionError",
 	  "LibraryFunctionInformation",
 	  "LibraryFunctionLoad",
 	  "LibraryFunctionUnload",
 	  "LibraryLoad",
 	  "LibraryUnload",
+	  "LicenseEntitlementObject",
+	  "LicenseEntitlements",
 	  "LicenseID",
+	  "LicensingSettings",
 	  "LiftingFilterData",
 	  "LiftingWaveletTransform",
 	  "LightBlue",
@@ -33742,6 +35121,7 @@ function requireMathematica () {
 	  "LinearFilter",
 	  "LinearFractionalOptimization",
 	  "LinearFractionalTransform",
+	  "LinearGradientFilling",
 	  "LinearGradientImage",
 	  "LinearizingTransformationData",
 	  "LinearLayer",
@@ -33812,6 +35192,7 @@ function requireMathematica () {
 	  "ListInterpolation",
 	  "ListLineIntegralConvolutionPlot",
 	  "ListLinePlot",
+	  "ListLinePlot3D",
 	  "ListLogLinearPlot",
 	  "ListLogLogPlot",
 	  "ListLogPlot",
@@ -33831,16 +35212,22 @@ function requireMathematica () {
 	  "ListStepPlot",
 	  "ListStreamDensityPlot",
 	  "ListStreamPlot",
+	  "ListStreamPlot3D",
 	  "ListSurfacePlot3D",
 	  "ListVectorDensityPlot",
+	  "ListVectorDisplacementPlot",
+	  "ListVectorDisplacementPlot3D",
 	  "ListVectorPlot",
 	  "ListVectorPlot3D",
 	  "ListZTransform",
 	  "Literal",
 	  "LiteralSearch",
+	  "LiteralType",
+	  "LoadCompiledComponent",
 	  "LocalAdaptiveBinarize",
 	  "LocalCache",
 	  "LocalClusteringCoefficient",
+	  "LocalEvaluate",
 	  "LocalizeDefinitions",
 	  "LocalizeVariables",
 	  "LocalObject",
@@ -33905,6 +35292,7 @@ function requireMathematica () {
 	  "LowerLeftArrow",
 	  "LowerRightArrow",
 	  "LowerTriangularize",
+	  "LowerTriangularMatrix",
 	  "LowerTriangularMatrixQ",
 	  "LowpassFilter",
 	  "LQEstimatorGains",
@@ -33960,6 +35348,7 @@ function requireMathematica () {
 	  "Manual",
 	  "Map",
 	  "MapAll",
+	  "MapApply",
 	  "MapAt",
 	  "MapIndexed",
 	  "MAProcess",
@@ -33972,11 +35361,20 @@ function requireMathematica () {
 	  "MarginalDistribution",
 	  "MarkovProcessProperties",
 	  "Masking",
+	  "MassConcentrationCondition",
+	  "MassFluxValue",
+	  "MassImpermeableBoundaryValue",
+	  "MassOutflowValue",
+	  "MassSymmetryValue",
+	  "MassTransferValue",
+	  "MassTransportPDEComponent",
 	  "MatchingDissimilarity",
 	  "MatchLocalNameQ",
 	  "MatchLocalNames",
 	  "MatchQ",
 	  "Material",
+	  "MaterialShading",
+	  "MaternPointProcess",
 	  "MathematicalFunctionData",
 	  "MathematicaNotation",
 	  "MathieuC",
@@ -34011,6 +35409,7 @@ function requireMathematica () {
 	  "MaxColorDistance",
 	  "MaxDate",
 	  "MaxDetect",
+	  "MaxDisplayedChildren",
 	  "MaxDuration",
 	  "MaxExtraBandwidths",
 	  "MaxExtraConditions",
@@ -34046,6 +35445,7 @@ function requireMathematica () {
 	  "MeanFilter",
 	  "MeanGraphDistance",
 	  "MeanNeighborDegree",
+	  "MeanPointDensity",
 	  "MeanShift",
 	  "MeanShiftFilter",
 	  "MeanSquaredLossLayer",
@@ -34120,6 +35520,7 @@ function requireMathematica () {
 	  "MexicanHatWavelet",
 	  "MeyerWavelet",
 	  "Midpoint",
+	  "MIMETypeToFormatList",
 	  "Min",
 	  "MinColorDistance",
 	  "MinDate",
@@ -34137,6 +35538,7 @@ function requireMathematica () {
 	  "MinMax",
 	  "MinorPlanetData",
 	  "Minors",
+	  "MinPointSeparation",
 	  "MinRecursion",
 	  "MinSize",
 	  "MinStableDistribution",
@@ -34151,6 +35553,7 @@ function requireMathematica () {
 	  "MissingString",
 	  "MissingStyle",
 	  "MissingValuePattern",
+	  "MissingValueSynthesis",
 	  "MittagLefflerE",
 	  "MixedFractionParts",
 	  "MixedGraphQ",
@@ -34162,6 +35565,7 @@ function requireMathematica () {
 	  "Mod",
 	  "Modal",
 	  "Mode",
+	  "ModelPredictiveController",
 	  "Modular",
 	  "ModularInverse",
 	  "ModularLambda",
@@ -34169,19 +35573,25 @@ function requireMathematica () {
 	  "Modulus",
 	  "MoebiusMu",
 	  "Molecule",
+	  "MoleculeAlign",
 	  "MoleculeContainsQ",
+	  "MoleculeDraw",
 	  "MoleculeEquivalentQ",
+	  "MoleculeFreeQ",
 	  "MoleculeGraph",
+	  "MoleculeMatchQ",
+	  "MoleculeMaximumCommonSubstructure",
 	  "MoleculeModify",
+	  "MoleculeName",
 	  "MoleculePattern",
 	  "MoleculePlot",
 	  "MoleculePlot3D",
 	  "MoleculeProperty",
 	  "MoleculeQ",
 	  "MoleculeRecognize",
+	  "MoleculeSubstructureCount",
 	  "MoleculeValue",
 	  "Moment",
-	  "Momentary",
 	  "MomentConvert",
 	  "MomentEvaluate",
 	  "MomentGeneratingFunction",
@@ -34216,6 +35626,7 @@ function requireMathematica () {
 	  "MovingMap",
 	  "MovingMedian",
 	  "MoyalDistribution",
+	  "MultiaxisArrangement",
 	  "Multicolumn",
 	  "MultiedgeStyle",
 	  "MultigraphQ",
@@ -34229,6 +35640,7 @@ function requireMathematica () {
 	  "MultiplicativeOrder",
 	  "Multiplicity",
 	  "MultiplySides",
+	  "MultiscriptBoxOptions",
 	  "Multiselection",
 	  "MultivariateHypergeometricDistribution",
 	  "MultivariatePoissonDistribution",
@@ -34246,6 +35658,7 @@ function requireMathematica () {
 	  "NBodySimulation",
 	  "NBodySimulationData",
 	  "NCache",
+	  "NCaputoD",
 	  "NDEigensystem",
 	  "NDEigenvalues",
 	  "NDSolve",
@@ -34253,17 +35666,17 @@ function requireMathematica () {
 	  "Nearest",
 	  "NearestFunction",
 	  "NearestMeshCells",
+	  "NearestNeighborG",
 	  "NearestNeighborGraph",
 	  "NearestTo",
 	  "NebulaData",
-	  "NeedCurrentFrontEndPackagePacket",
-	  "NeedCurrentFrontEndSymbolsPacket",
 	  "NeedlemanWunschSimilarity",
 	  "Needs",
 	  "Negative",
 	  "NegativeBinomialDistribution",
 	  "NegativeDefiniteMatrixQ",
 	  "NegativeIntegers",
+	  "NegativelyOrientedPoints",
 	  "NegativeMultinomialDistribution",
 	  "NegativeRationals",
 	  "NegativeReals",
@@ -34276,9 +35689,12 @@ function requireMathematica () {
 	  "NestedScriptRules",
 	  "NestGraph",
 	  "NestList",
+	  "NestTree",
 	  "NestWhile",
 	  "NestWhileList",
 	  "NetAppend",
+	  "NetArray",
+	  "NetArrayLayer",
 	  "NetBidirectionalOperator",
 	  "NetChain",
 	  "NetDecoder",
@@ -34286,6 +35702,7 @@ function requireMathematica () {
 	  "NetDrop",
 	  "NetEncoder",
 	  "NetEvaluationMode",
+	  "NetExternalObject",
 	  "NetExtract",
 	  "NetFlatten",
 	  "NetFoldOperator",
@@ -34313,6 +35730,7 @@ function requireMathematica () {
 	  "NetTake",
 	  "NetTrain",
 	  "NetTrainResultsObject",
+	  "NetUnfold",
 	  "NetworkPacketCapture",
 	  "NetworkPacketRecording",
 	  "NetworkPacketRecordingDuring",
@@ -34329,6 +35747,8 @@ function requireMathematica () {
 	  "NextDate",
 	  "NextPrime",
 	  "NextScheduledTaskTime",
+	  "NeymanScottPointProcess",
+	  "NFractionalD",
 	  "NHoldAll",
 	  "NHoldFirst",
 	  "NHoldRest",
@@ -34340,6 +35760,7 @@ function requireMathematica () {
 	  "NMaxValue",
 	  "NMinimize",
 	  "NMinValue",
+	  "NominalScale",
 	  "NominalVariables",
 	  "NonAssociative",
 	  "NoncentralBetaDistribution",
@@ -34382,10 +35803,10 @@ function requireMathematica () {
 	  "Notebook",
 	  "NotebookApply",
 	  "NotebookAutoSave",
+	  "NotebookBrowseDirectory",
 	  "NotebookClose",
 	  "NotebookConvertSettings",
 	  "NotebookCreate",
-	  "NotebookCreateReturnObject",
 	  "NotebookDefault",
 	  "NotebookDelete",
 	  "NotebookDirectory",
@@ -34394,28 +35815,20 @@ function requireMathematica () {
 	  "NotebookEventActions",
 	  "NotebookFileName",
 	  "NotebookFind",
-	  "NotebookFindReturnObject",
 	  "NotebookGet",
-	  "NotebookGetLayoutInformationPacket",
-	  "NotebookGetMisspellingsPacket",
 	  "NotebookImport",
 	  "NotebookInformation",
 	  "NotebookInterfaceObject",
 	  "NotebookLocate",
 	  "NotebookObject",
 	  "NotebookOpen",
-	  "NotebookOpenReturnObject",
 	  "NotebookPath",
 	  "NotebookPrint",
 	  "NotebookPut",
-	  "NotebookPutReturnObject",
 	  "NotebookRead",
-	  "NotebookResetGeneratedCells",
 	  "Notebooks",
 	  "NotebookSave",
-	  "NotebookSaveAs",
 	  "NotebookSelection",
-	  "NotebookSetupLayoutInformationPacket",
 	  "NotebooksMenu",
 	  "NotebookTemplate",
 	  "NotebookWrite",
@@ -34477,6 +35890,7 @@ function requireMathematica () {
 	  "NProductFactors",
 	  "NRoots",
 	  "NSolve",
+	  "NSolveValues",
 	  "NSum",
 	  "NSumTerms",
 	  "NuclearExplosionData",
@@ -34488,6 +35902,7 @@ function requireMathematica () {
 	  "Number",
 	  "NumberCompose",
 	  "NumberDecompose",
+	  "NumberDigit",
 	  "NumberExpand",
 	  "NumberFieldClassNumber",
 	  "NumberFieldDiscriminant",
@@ -34522,6 +35937,7 @@ function requireMathematica () {
 	  "NyquistGridLines",
 	  "NyquistPlot",
 	  "O",
+	  "ObjectExistsQ",
 	  "ObservabilityGramian",
 	  "ObservabilityMatrix",
 	  "ObservableDecomposition",
@@ -34575,6 +35991,7 @@ function requireMathematica () {
 	  "OrderingLayer",
 	  "Orderless",
 	  "OrderlessPatternSequence",
+	  "OrdinalScale",
 	  "OrnsteinUhlenbeckProcess",
 	  "Orthogonalize",
 	  "OrthogonalMatrixQ",
@@ -34590,6 +36007,7 @@ function requireMathematica () {
 	  "OutputGrouping",
 	  "OutputMathEditExpression",
 	  "OutputNamePacket",
+	  "OutputPorts",
 	  "OutputResponse",
 	  "OutputSizeLimit",
 	  "OutputStream",
@@ -34602,6 +36020,7 @@ function requireMathematica () {
 	  "Overlay",
 	  "OverlayBox",
 	  "OverlayBoxOptions",
+	  "OverlayVideo",
 	  "Overscript",
 	  "OverscriptBox",
 	  "OverscriptBoxOptions",
@@ -34634,6 +36053,7 @@ function requireMathematica () {
 	  "PacletSites",
 	  "PacletSiteUnregister",
 	  "PacletSiteUpdate",
+	  "PacletSymbol",
 	  "PacletUninstall",
 	  "PacletUpdate",
 	  "PaddedForm",
@@ -34655,6 +36075,7 @@ function requireMathematica () {
 	  "PageTheme",
 	  "PageWidth",
 	  "Pagination",
+	  "PairCorrelationG",
 	  "PairedBarChart",
 	  "PairedHistogram",
 	  "PairedSmoothHistogram",
@@ -34662,6 +36083,7 @@ function requireMathematica () {
 	  "PairedZTest",
 	  "PaletteNotebook",
 	  "PalettePath",
+	  "PalettesMenuSettings",
 	  "PalindromeQ",
 	  "Pane",
 	  "PaneBox",
@@ -34678,12 +36100,14 @@ function requireMathematica () {
 	  "ParagraphIndent",
 	  "ParagraphSpacing",
 	  "ParallelArray",
+	  "ParallelAxisPlot",
 	  "ParallelCombine",
 	  "ParallelDo",
 	  "Parallelepiped",
 	  "ParallelEvaluate",
 	  "Parallelization",
 	  "Parallelize",
+	  "ParallelKernels",
 	  "ParallelMap",
 	  "ParallelNeeds",
 	  "Parallelogram",
@@ -34696,6 +36120,7 @@ function requireMathematica () {
 	  "ParameterEstimator",
 	  "ParameterMixtureDistribution",
 	  "ParameterVariables",
+	  "ParametricConvexOptimization",
 	  "ParametricFunction",
 	  "ParametricNDSolve",
 	  "ParametricNDSolveValue",
@@ -34707,6 +36132,12 @@ function requireMathematica () {
 	  "ParentCell",
 	  "ParentConnect",
 	  "ParentDirectory",
+	  "ParentEdgeLabel",
+	  "ParentEdgeLabelFunction",
+	  "ParentEdgeLabelStyle",
+	  "ParentEdgeShapeFunction",
+	  "ParentEdgeStyle",
+	  "ParentEdgeStyleFunction",
 	  "ParentForm",
 	  "Parenthesize",
 	  "ParentList",
@@ -34740,6 +36171,7 @@ function requireMathematica () {
 	  "PathGraphQ",
 	  "Pattern",
 	  "PatternFilling",
+	  "PatternReaction",
 	  "PatternSequence",
 	  "PatternTest",
 	  "PauliMatrix",
@@ -34752,6 +36184,7 @@ function requireMathematica () {
 	  "PearsonChiSquareTest",
 	  "PearsonCorrelationTest",
 	  "PearsonDistribution",
+	  "PenttinenPointProcess",
 	  "PercentForm",
 	  "PerfectNumber",
 	  "PerfectNumberQ",
@@ -34774,6 +36207,7 @@ function requireMathematica () {
 	  "PermutationLength",
 	  "PermutationList",
 	  "PermutationListQ",
+	  "PermutationMatrix",
 	  "PermutationMax",
 	  "PermutationMin",
 	  "PermutationOrder",
@@ -34790,15 +36224,19 @@ function requireMathematica () {
 	  "PersistenceTime",
 	  "PersistentObject",
 	  "PersistentObjects",
+	  "PersistentSymbol",
 	  "PersistentValue",
 	  "PersonData",
 	  "PERTDistribution",
 	  "PetersenGraph",
 	  "PhaseMargins",
 	  "PhaseRange",
+	  "PhongShading",
 	  "PhysicalSystemData",
 	  "Pi",
 	  "Pick",
+	  "PickedElements",
+	  "PickMode",
 	  "PIDData",
 	  "PIDDerivativeFilter",
 	  "PIDFeedforward",
@@ -34818,9 +36256,11 @@ function requireMathematica () {
 	  "PixelValuePositions",
 	  "Placed",
 	  "Placeholder",
+	  "PlaceholderLayer",
 	  "PlaceholderReplace",
 	  "Plain",
 	  "PlanarAngle",
+	  "PlanarFaceList",
 	  "PlanarGraph",
 	  "PlanarGraphQ",
 	  "PlanckRadiationLaw",
@@ -34829,6 +36269,7 @@ function requireMathematica () {
 	  "PlanetData",
 	  "PlantData",
 	  "Play",
+	  "PlaybackSettings",
 	  "PlayRange",
 	  "Plot",
 	  "Plot3D",
@@ -34859,11 +36300,23 @@ function requireMathematica () {
 	  "Point3DBoxOptions",
 	  "PointBox",
 	  "PointBoxOptions",
+	  "PointCountDistribution",
+	  "PointDensity",
+	  "PointDensityFunction",
 	  "PointFigureChart",
 	  "PointLegend",
+	  "PointLight",
+	  "PointProcessEstimator",
+	  "PointProcessFitTest",
+	  "PointProcessParameterAssumptions",
+	  "PointProcessParameterQ",
 	  "PointSize",
+	  "PointStatisticFunction",
+	  "PointValuePlot",
 	  "PoissonConsulDistribution",
 	  "PoissonDistribution",
+	  "PoissonPDEComponent",
+	  "PoissonPointProcess",
 	  "PoissonProcess",
 	  "PoissonWindow",
 	  "PolarAxes",
@@ -34888,11 +36341,14 @@ function requireMathematica () {
 	  "PolygonScale",
 	  "Polyhedron",
 	  "PolyhedronAngle",
+	  "PolyhedronBox",
+	  "PolyhedronBoxOptions",
 	  "PolyhedronCoordinates",
 	  "PolyhedronData",
 	  "PolyhedronDecomposition",
 	  "PolyhedronGenus",
 	  "PolyLog",
+	  "PolynomialExpressionQ",
 	  "PolynomialExtendedGCD",
 	  "PolynomialForm",
 	  "PolynomialGCD",
@@ -34904,6 +36360,7 @@ function requireMathematica () {
 	  "PolynomialReduce",
 	  "PolynomialRemainder",
 	  "Polynomials",
+	  "PolynomialSumOfSquaresList",
 	  "PoolingLayer",
 	  "PopupMenu",
 	  "PopupMenuBox",
@@ -34912,9 +36369,12 @@ function requireMathematica () {
 	  "PopupWindow",
 	  "Position",
 	  "PositionIndex",
+	  "PositionLargest",
+	  "PositionSmallest",
 	  "Positive",
 	  "PositiveDefiniteMatrixQ",
 	  "PositiveIntegers",
+	  "PositivelyOrientedPoints",
 	  "PositiveRationals",
 	  "PositiveReals",
 	  "PositiveSemidefiniteMatrixQ",
@@ -34947,6 +36407,7 @@ function requireMathematica () {
 	  "PredictorMeasurementsObject",
 	  "PreemptProtect",
 	  "PreferencesPath",
+	  "PreferencesSettings",
 	  "Prefix",
 	  "PreIncrement",
 	  "Prepend",
@@ -35020,10 +36481,12 @@ function requireMathematica () {
 	  "ProgressIndicator",
 	  "ProgressIndicatorBox",
 	  "ProgressIndicatorBoxOptions",
+	  "ProgressReporting",
 	  "Projection",
 	  "Prolog",
 	  "PromptForm",
 	  "ProofObject",
+	  "PropagateAborts",
 	  "Properties",
 	  "Property",
 	  "PropertyList",
@@ -35075,13 +36538,20 @@ function requireMathematica () {
 	  "Quartiles",
 	  "QuartileSkewness",
 	  "Query",
+	  "QuestionGenerator",
+	  "QuestionInterface",
+	  "QuestionObject",
+	  "QuestionSelector",
 	  "QueueingNetworkProcess",
 	  "QueueingProcess",
 	  "QueueProperties",
 	  "Quiet",
+	  "QuietEcho",
 	  "Quit",
 	  "Quotient",
 	  "QuotientRemainder",
+	  "RadialAxisPlot",
+	  "RadialGradientFilling",
 	  "RadialGradientImage",
 	  "RadialityCentrality",
 	  "RadicalBox",
@@ -35098,11 +36568,14 @@ function requireMathematica () {
 	  "RamanujanTauZ",
 	  "Ramp",
 	  "Random",
+	  "RandomArrayLayer",
 	  "RandomChoice",
 	  "RandomColor",
 	  "RandomComplex",
+	  "RandomDate",
 	  "RandomEntity",
 	  "RandomFunction",
+	  "RandomGeneratorState",
 	  "RandomGeoPosition",
 	  "RandomGraph",
 	  "RandomImage",
@@ -35110,6 +36583,7 @@ function requireMathematica () {
 	  "RandomInteger",
 	  "RandomPermutation",
 	  "RandomPoint",
+	  "RandomPointConfiguration",
 	  "RandomPolygon",
 	  "RandomPolyhedron",
 	  "RandomPrime",
@@ -35117,6 +36591,8 @@ function requireMathematica () {
 	  "RandomSample",
 	  "RandomSeed",
 	  "RandomSeeding",
+	  "RandomTime",
+	  "RandomTree",
 	  "RandomVariate",
 	  "RandomWalkProcess",
 	  "RandomWord",
@@ -35136,6 +36612,7 @@ function requireMathematica () {
 	  "Rasterize",
 	  "RasterSize",
 	  "Rational",
+	  "RationalExpressionQ",
 	  "RationalFunctions",
 	  "Rationalize",
 	  "Rationals",
@@ -35146,6 +36623,9 @@ function requireMathematica () {
 	  "RawMedium",
 	  "RayleighDistribution",
 	  "Re",
+	  "ReactionBalance",
+	  "ReactionBalancedQ",
+	  "ReactionPDETerm",
 	  "Read",
 	  "ReadByteArray",
 	  "ReadLine",
@@ -35161,8 +36641,10 @@ function requireMathematica () {
 	  "RealSign",
 	  "Reap",
 	  "RebuildPacletData",
+	  "RecalibrationFunction",
 	  "RecognitionPrior",
 	  "RecognitionThreshold",
+	  "ReconstructionMesh",
 	  "Record",
 	  "RecordLists",
 	  "RecordSeparators",
@@ -35192,14 +36674,19 @@ function requireMathematica () {
 	  "RegionBoundaryStyle",
 	  "RegionBounds",
 	  "RegionCentroid",
+	  "RegionCongruent",
+	  "RegionConvert",
 	  "RegionDifference",
+	  "RegionDilation",
 	  "RegionDimension",
 	  "RegionDisjoint",
 	  "RegionDistance",
 	  "RegionDistanceFunction",
 	  "RegionEmbeddingDimension",
 	  "RegionEqual",
+	  "RegionErosion",
 	  "RegionFillingStyle",
+	  "RegionFit",
 	  "RegionFunction",
 	  "RegionImage",
 	  "RegionIntersection",
@@ -35214,6 +36701,7 @@ function requireMathematica () {
 	  "RegionProduct",
 	  "RegionQ",
 	  "RegionResize",
+	  "RegionSimilar",
 	  "RegionSize",
 	  "RegionSymmetricDifference",
 	  "RegionUnion",
@@ -35236,11 +36724,22 @@ function requireMathematica () {
 	  "ReliefImage",
 	  "ReliefPlot",
 	  "RemoteAuthorizationCaching",
+	  "RemoteBatchJobAbort",
+	  "RemoteBatchJobObject",
+	  "RemoteBatchJobs",
+	  "RemoteBatchMapSubmit",
+	  "RemoteBatchSubmissionEnvironment",
+	  "RemoteBatchSubmit",
 	  "RemoteConnect",
 	  "RemoteConnectionObject",
+	  "RemoteEvaluate",
 	  "RemoteFile",
+	  "RemoteInputFiles",
+	  "RemoteKernelObject",
+	  "RemoteProviderSettings",
 	  "RemoteRun",
 	  "RemoteRunProcess",
+	  "RemovalConditions",
 	  "Remove",
 	  "RemoveAlphaChannel",
 	  "RemoveAsynchronousTask",
@@ -35270,6 +36769,7 @@ function requireMathematica () {
 	  "RepeatingElement",
 	  "Replace",
 	  "ReplaceAll",
+	  "ReplaceAt",
 	  "ReplaceHeldPart",
 	  "ReplaceImageValue",
 	  "ReplaceList",
@@ -35284,12 +36784,13 @@ function requireMathematica () {
 	  "Rescale",
 	  "RescalingTransform",
 	  "ResetDirectory",
-	  "ResetMenusPacket",
 	  "ResetScheduledTask",
 	  "ReshapeLayer",
 	  "Residue",
+	  "ResidueSum",
 	  "ResizeLayer",
 	  "Resolve",
+	  "ResolveContextAliases",
 	  "ResourceAcquire",
 	  "ResourceData",
 	  "ResourceFunction",
@@ -35310,6 +36811,7 @@ function requireMathematica () {
 	  "Resultant",
 	  "ResumePacket",
 	  "Return",
+	  "ReturnCreatesNewCell",
 	  "ReturnEntersInput",
 	  "ReturnExpressionPacket",
 	  "ReturnInputFormPacket",
@@ -35357,8 +36859,11 @@ function requireMathematica () {
 	  "RightUpVectorBar",
 	  "RightVector",
 	  "RightVectorBar",
+	  "RipleyK",
+	  "RipleyRassonRegion",
 	  "RiskAchievementImportance",
 	  "RiskReductionImportance",
+	  "RobustConvexOptimization",
 	  "RogersTanimotoDissimilarity",
 	  "RollPitchYawAngles",
 	  "RollPitchYawMatrix",
@@ -35372,6 +36877,7 @@ function requireMathematica () {
 	  "RootReduce",
 	  "Roots",
 	  "RootSum",
+	  "RootTree",
 	  "Rotate",
 	  "RotateLabel",
 	  "RotateLeft",
@@ -35404,6 +36910,7 @@ function requireMathematica () {
 	  "RuleForm",
 	  "RulePlot",
 	  "RulerUnits",
+	  "RulesTree",
 	  "Run",
 	  "RunProcess",
 	  "RunScheduledTask",
@@ -35411,6 +36918,7 @@ function requireMathematica () {
 	  "RuntimeAttributes",
 	  "RuntimeOptions",
 	  "RussellRaoDissimilarity",
+	  "SameAs",
 	  "SameQ",
 	  "SameTest",
 	  "SameTestProperties",
@@ -35487,6 +36995,7 @@ function requireMathematica () {
 	  "SectorSpacing",
 	  "SecuredAuthenticationKey",
 	  "SecuredAuthenticationKeys",
+	  "SecurityCertificate",
 	  "SeedRandom",
 	  "Select",
 	  "Selectable",
@@ -35502,12 +37011,10 @@ function requireMathematica () {
 	  "SelectionCellParentStyle",
 	  "SelectionCreateCell",
 	  "SelectionDebuggerTag",
-	  "SelectionDuplicateCell",
 	  "SelectionEvaluate",
 	  "SelectionEvaluateCreateCell",
 	  "SelectionMove",
 	  "SelectionPlaceholder",
-	  "SelectionSetStyle",
 	  "SelectWithContents",
 	  "SelfLoops",
 	  "SelfLoopStyle",
@@ -35527,6 +37034,7 @@ function requireMathematica () {
 	  "SequenceFoldList",
 	  "SequenceForm",
 	  "SequenceHold",
+	  "SequenceIndicesLayer",
 	  "SequenceLastLayer",
 	  "SequenceMostLayer",
 	  "SequencePosition",
@@ -35554,16 +37062,13 @@ function requireMathematica () {
 	  "SetAlphaChannel",
 	  "SetAttributes",
 	  "Setbacks",
-	  "SetBoxFormNamesPacket",
 	  "SetCloudDirectory",
 	  "SetCookies",
 	  "SetDelayed",
 	  "SetDirectory",
 	  "SetEnvironment",
-	  "SetEvaluationNotebook",
 	  "SetFileDate",
-	  "SetFileLoadingContext",
-	  "SetNotebookStatusLine",
+	  "SetFileFormatProperties",
 	  "SetOptions",
 	  "SetOptionsPacket",
 	  "SetPermissions",
@@ -35573,7 +37078,6 @@ function requireMathematica () {
 	  "SetSelectedNotebook",
 	  "SetSharedFunction",
 	  "SetSharedVariable",
-	  "SetSpeechParametersPacket",
 	  "SetStreamPosition",
 	  "SetSystemModel",
 	  "SetSystemOptions",
@@ -35583,7 +37087,6 @@ function requireMathematica () {
 	  "SetterBoxOptions",
 	  "Setting",
 	  "SetUsers",
-	  "SetValue",
 	  "Shading",
 	  "Shallow",
 	  "ShannonWavelet",
@@ -35681,6 +37184,7 @@ function requireMathematica () {
 	  "Slider2DBoxOptions",
 	  "SliderBox",
 	  "SliderBoxOptions",
+	  "SlideShowVideo",
 	  "SlideView",
 	  "Slot",
 	  "SlotSequence",
@@ -35694,8 +37198,10 @@ function requireMathematica () {
 	  "SmoothHistogram",
 	  "SmoothHistogram3D",
 	  "SmoothKernelDistribution",
+	  "SmoothPointDensity",
 	  "SnDispersion",
 	  "Snippet",
+	  "SnippetsVideo",
 	  "SnubPolyhedron",
 	  "SocialMediaData",
 	  "Socket",
@@ -35713,12 +37219,20 @@ function requireMathematica () {
 	  "SokalSneathDissimilarity",
 	  "SolarEclipse",
 	  "SolarSystemFeatureData",
+	  "SolarTime",
 	  "SolidAngle",
+	  "SolidBoundaryLoadValue",
 	  "SolidData",
+	  "SolidDisplacementCondition",
+	  "SolidFixedCondition",
+	  "SolidMechanicsPDEComponent",
+	  "SolidMechanicsStrain",
+	  "SolidMechanicsStress",
 	  "SolidRegionQ",
 	  "Solve",
 	  "SolveAlways",
 	  "SolveDelayed",
+	  "SolveValues",
 	  "Sort",
 	  "SortBy",
 	  "SortedBy",
@@ -35728,6 +37242,7 @@ function requireMathematica () {
 	  "SoundNote",
 	  "SoundVolume",
 	  "SourceLink",
+	  "SourcePDETerm",
 	  "Sow",
 	  "Space",
 	  "SpaceCurveData",
@@ -35746,12 +37261,23 @@ function requireMathematica () {
 	  "SpanningCharacters",
 	  "SpanSymmetric",
 	  "SparseArray",
+	  "SparseArrayQ",
+	  "SpatialBinnedPointData",
+	  "SpatialBoundaryCorrection",
+	  "SpatialEstimate",
+	  "SpatialEstimatorFunction",
 	  "SpatialGraphDistribution",
+	  "SpatialJ",
 	  "SpatialMedian",
+	  "SpatialNoiseLevel",
+	  "SpatialObservationRegionQ",
+	  "SpatialPointData",
+	  "SpatialPointSelect",
+	  "SpatialRandomnessTest",
 	  "SpatialTransformationLayer",
+	  "SpatialTrendFunction",
 	  "Speak",
 	  "SpeakerMatchQ",
-	  "SpeakTextPacket",
 	  "SpearmanRankTest",
 	  "SpearmanRho",
 	  "SpeciesData",
@@ -35769,9 +37295,9 @@ function requireMathematica () {
 	  "SpellingDictionaries",
 	  "SpellingDictionariesPath",
 	  "SpellingOptions",
-	  "SpellingSuggestionsPacket",
 	  "Sphere",
 	  "SphereBox",
+	  "SphereBoxOptions",
 	  "SpherePoints",
 	  "SphericalBesselJ",
 	  "SphericalBesselY",
@@ -35801,6 +37327,7 @@ function requireMathematica () {
 	  "Split",
 	  "SplitBy",
 	  "SpokenString",
+	  "SpotLight",
 	  "Sqrt",
 	  "SqrtBox",
 	  "SqrtBoxOptions",
@@ -35873,16 +37400,20 @@ function requireMathematica () {
 	  "StopScheduledTask",
 	  "StrataVariables",
 	  "StratonovichProcess",
+	  "StraussHardcorePointProcess",
+	  "StraussPointProcess",
 	  "StreamColorFunction",
 	  "StreamColorFunctionScaling",
 	  "StreamDensityPlot",
 	  "StreamMarkers",
 	  "StreamPlot",
+	  "StreamPlot3D",
 	  "StreamPoints",
 	  "StreamPosition",
 	  "Streams",
 	  "StreamScale",
 	  "StreamStyle",
+	  "StrictInequalities",
 	  "String",
 	  "StringBreak",
 	  "StringByteCount",
@@ -35896,6 +37427,7 @@ function requireMathematica () {
 	  "StringExtract",
 	  "StringForm",
 	  "StringFormat",
+	  "StringFormatQ",
 	  "StringFreeQ",
 	  "StringInsert",
 	  "StringJoin",
@@ -35919,14 +37451,17 @@ function requireMathematica () {
 	  "StringSplit",
 	  "StringStartsQ",
 	  "StringTake",
+	  "StringTakeDrop",
 	  "StringTemplate",
 	  "StringToByteArray",
 	  "StringToStream",
 	  "StringTrim",
 	  "StripBoxes",
 	  "StripOnInput",
+	  "StripStyleOnPaste",
 	  "StripWrapperBoxes",
 	  "StrokeForm",
+	  "Struckthrough",
 	  "StructuralImportance",
 	  "StructuredArray",
 	  "StructuredArrayHeadQ",
@@ -35976,7 +37511,7 @@ function requireMathematica () {
 	  "SubsuperscriptBox",
 	  "SubsuperscriptBoxOptions",
 	  "SubtitleEncoding",
-	  "SubtitleTracks",
+	  "SubtitleTrackSelection",
 	  "Subtract",
 	  "SubtractFrom",
 	  "SubtractSides",
@@ -36024,6 +37559,7 @@ function requireMathematica () {
 	  "SymbolName",
 	  "SymletWavelet",
 	  "Symmetric",
+	  "SymmetricDifference",
 	  "SymmetricGroup",
 	  "SymmetricKey",
 	  "SymmetricMatrixQ",
@@ -36061,6 +37597,7 @@ function requireMathematica () {
 	  "SystemModeler",
 	  "SystemModelExamples",
 	  "SystemModelLinearize",
+	  "SystemModelMeasurements",
 	  "SystemModelParametricSimulate",
 	  "SystemModelPlot",
 	  "SystemModelProgressReporting",
@@ -36074,6 +37611,7 @@ function requireMathematica () {
 	  "SystemProcessData",
 	  "SystemProcesses",
 	  "SystemsConnectionsModel",
+	  "SystemsModelControllerData",
 	  "SystemsModelDelay",
 	  "SystemsModelDelayApproximate",
 	  "SystemsModelDelete",
@@ -36101,8 +37639,11 @@ function requireMathematica () {
 	  "TableSpacing",
 	  "TableView",
 	  "TableViewBox",
+	  "TableViewBoxAlignment",
 	  "TableViewBoxBackground",
+	  "TableViewBoxHeaders",
 	  "TableViewBoxItemSize",
+	  "TableViewBoxItemStyle",
 	  "TableViewBoxOptions",
 	  "TabSpacings",
 	  "TabView",
@@ -36169,6 +37710,9 @@ function requireMathematica () {
 	  "TensorSymmetry",
 	  "TensorTranspose",
 	  "TensorWedge",
+	  "TerminatedEvaluation",
+	  "TernaryListPlot",
+	  "TernaryPlotCorners",
 	  "TestID",
 	  "TestReport",
 	  "TestReportObject",
@@ -36218,8 +37762,10 @@ function requireMathematica () {
 	  "Thin",
 	  "Thinning",
 	  "ThisLink",
+	  "ThomasPointProcess",
 	  "ThompsonGroupTh",
 	  "Thread",
+	  "Threaded",
 	  "ThreadingLayer",
 	  "ThreeJSymbol",
 	  "Threshold",
@@ -36228,6 +37774,12 @@ function requireMathematica () {
 	  "ThueMorse",
 	  "Thumbnail",
 	  "Thursday",
+	  "TickDirection",
+	  "TickLabelOrientation",
+	  "TickLabelPositioning",
+	  "TickLabels",
+	  "TickLengths",
+	  "TickPositions",
 	  "Ticks",
 	  "TicksStyle",
 	  "TideData",
@@ -36260,6 +37812,8 @@ function requireMathematica () {
 	  "TimeSeriesShift",
 	  "TimeSeriesThread",
 	  "TimeSeriesWindow",
+	  "TimeSystem",
+	  "TimeSystemConvert",
 	  "TimeUsed",
 	  "TimeValue",
 	  "TimeWarpingCorrespondence",
@@ -36308,7 +37862,10 @@ function requireMathematica () {
 	  "ToPolarCoordinates",
 	  "TopologicalSort",
 	  "ToRadicals",
+	  "ToRawPointer",
 	  "ToRules",
+	  "Torus",
+	  "TorusGraph",
 	  "ToSphericalCoordinates",
 	  "ToString",
 	  "Total",
@@ -36320,6 +37877,7 @@ function requireMathematica () {
 	  "TouchscreenAutoZoom",
 	  "TouchscreenControlPlacement",
 	  "ToUpperCase",
+	  "TourVideo",
 	  "Tr",
 	  "Trace",
 	  "TraceAbove",
@@ -36335,6 +37893,7 @@ function requireMathematica () {
 	  "TraceOriginal",
 	  "TracePrint",
 	  "TraceScan",
+	  "TrackCellChangeTimes",
 	  "TrackedSymbols",
 	  "TrackingFunction",
 	  "TracyWidomDistribution",
@@ -36343,12 +37902,14 @@ function requireMathematica () {
 	  "TraditionalFunctionNotation",
 	  "TraditionalNotation",
 	  "TraditionalOrder",
+	  "TrainImageContentDetector",
 	  "TrainingProgressCheckpointing",
 	  "TrainingProgressFunction",
 	  "TrainingProgressMeasurements",
 	  "TrainingProgressReporting",
 	  "TrainingStoppingCriterion",
 	  "TrainingUpdateSchedule",
+	  "TrainTextContentDetector",
 	  "TransferFunctionCancel",
 	  "TransferFunctionExpand",
 	  "TransferFunctionFactor",
@@ -36377,6 +37938,7 @@ function requireMathematica () {
 	  "TransparentColor",
 	  "Transpose",
 	  "TransposeLayer",
+	  "TrapEnterKey",
 	  "TrapSelection",
 	  "TravelDirections",
 	  "TravelDirectionsData",
@@ -36384,10 +37946,47 @@ function requireMathematica () {
 	  "TravelDistanceList",
 	  "TravelMethod",
 	  "TravelTime",
+	  "Tree",
+	  "TreeCases",
+	  "TreeChildren",
+	  "TreeCount",
+	  "TreeData",
+	  "TreeDelete",
+	  "TreeDepth",
+	  "TreeElementCoordinates",
+	  "TreeElementLabel",
+	  "TreeElementLabelFunction",
+	  "TreeElementLabelStyle",
+	  "TreeElementShape",
+	  "TreeElementShapeFunction",
+	  "TreeElementSize",
+	  "TreeElementSizeFunction",
+	  "TreeElementStyle",
+	  "TreeElementStyleFunction",
+	  "TreeExpression",
+	  "TreeExtract",
+	  "TreeFold",
 	  "TreeForm",
 	  "TreeGraph",
 	  "TreeGraphQ",
+	  "TreeInsert",
+	  "TreeLayout",
+	  "TreeLeafCount",
+	  "TreeLeafQ",
+	  "TreeLeaves",
+	  "TreeLevel",
+	  "TreeMap",
+	  "TreeMapAt",
+	  "TreeOutline",
 	  "TreePlot",
+	  "TreePosition",
+	  "TreeQ",
+	  "TreeReplacePart",
+	  "TreeRules",
+	  "TreeScan",
+	  "TreeSelect",
+	  "TreeSize",
+	  "TreeTraversalOrder",
 	  "TrendStyle",
 	  "Triangle",
 	  "TriangleCenter",
@@ -36430,6 +38029,10 @@ function requireMathematica () {
 	  "TuttePolynomial",
 	  "TwoWayRule",
 	  "Typed",
+	  "TypeDeclaration",
+	  "TypeEvaluate",
+	  "TypeHint",
+	  "TypeOf",
 	  "TypeSpecifier",
 	  "UnateQ",
 	  "Uncompress",
@@ -36462,6 +38065,7 @@ function requireMathematica () {
 	  "UnionedEntityClass",
 	  "UnionPlus",
 	  "Unique",
+	  "UniqueElements",
 	  "UnitaryMatrixQ",
 	  "UnitBox",
 	  "UnitConvert",
@@ -36478,12 +38082,15 @@ function requireMathematica () {
 	  "UniverseModelData",
 	  "UniversityData",
 	  "UnixTime",
+	  "UnlabeledTree",
+	  "UnmanageObject",
 	  "Unprotect",
 	  "UnregisterExternalEvaluator",
 	  "UnsameQ",
 	  "UnsavedVariables",
 	  "Unset",
 	  "UnsetShared",
+	  "Until",
 	  "UntrackedVariables",
 	  "Up",
 	  "UpArrow",
@@ -36501,6 +38108,7 @@ function requireMathematica () {
 	  "UpperLeftArrow",
 	  "UpperRightArrow",
 	  "UpperTriangularize",
+	  "UpperTriangularMatrix",
 	  "UpperTriangularMatrixQ",
 	  "Upsample",
 	  "UpSet",
@@ -36529,6 +38137,7 @@ function requireMathematica () {
 	  "URLSaveAsynchronous",
 	  "URLShorten",
 	  "URLSubmit",
+	  "UseEmbeddedLibrary",
 	  "UseGraphicsRange",
 	  "UserDefinedWavelet",
 	  "Using",
@@ -36536,9 +38145,9 @@ function requireMathematica () {
 	  "UtilityFunction",
 	  "V2Get",
 	  "ValenceErrorHandling",
+	  "ValenceFilling",
 	  "ValidationLength",
 	  "ValidationSet",
-	  "Value",
 	  "ValueBox",
 	  "ValueBoxOptions",
 	  "ValueDimensions",
@@ -36547,18 +38156,24 @@ function requireMathematica () {
 	  "ValueQ",
 	  "Values",
 	  "ValuesData",
+	  "VandermondeMatrix",
 	  "Variables",
 	  "Variance",
 	  "VarianceEquivalenceTest",
 	  "VarianceEstimatorFunction",
 	  "VarianceGammaDistribution",
+	  "VarianceGammaPointProcess",
 	  "VarianceTest",
+	  "VariogramFunction",
+	  "VariogramModel",
 	  "VectorAngle",
 	  "VectorAround",
 	  "VectorAspectRatio",
 	  "VectorColorFunction",
 	  "VectorColorFunctionScaling",
 	  "VectorDensityPlot",
+	  "VectorDisplacementPlot",
+	  "VectorDisplacementPlot3D",
 	  "VectorGlyphData",
 	  "VectorGreater",
 	  "VectorGreaterEqual",
@@ -36578,7 +38193,6 @@ function requireMathematica () {
 	  "Vee",
 	  "Verbatim",
 	  "Verbose",
-	  "VerboseConvertToPostScriptPacket",
 	  "VerificationTest",
 	  "VerifyConvergence",
 	  "VerifyDerivedKey",
@@ -36588,11 +38202,10 @@ function requireMathematica () {
 	  "VerifySecurityCertificates",
 	  "VerifySolutions",
 	  "VerifyTestAssumptions",
-	  "Version",
 	  "VersionedPreferences",
-	  "VersionNumber",
 	  "VertexAdd",
 	  "VertexCapacity",
+	  "VertexChromaticNumber",
 	  "VertexColors",
 	  "VertexComponent",
 	  "VertexConnectivity",
@@ -36609,6 +38222,7 @@ function requireMathematica () {
 	  "VertexDiceSimilarity",
 	  "VertexEccentricity",
 	  "VertexInComponent",
+	  "VertexInComponentGraph",
 	  "VertexInDegree",
 	  "VertexIndex",
 	  "VertexJaccardSimilarity",
@@ -36618,6 +38232,7 @@ function requireMathematica () {
 	  "VertexList",
 	  "VertexNormals",
 	  "VertexOutComponent",
+	  "VertexOutComponentGraph",
 	  "VertexOutDegree",
 	  "VertexQ",
 	  "VertexRenderingFunction",
@@ -36627,6 +38242,7 @@ function requireMathematica () {
 	  "VertexSize",
 	  "VertexStyle",
 	  "VertexTextureCoordinates",
+	  "VertexTransitiveGraphQ",
 	  "VertexWeight",
 	  "VertexWeightedGraphQ",
 	  "Vertical",
@@ -36637,18 +38253,35 @@ function requireMathematica () {
 	  "VerticalSlider",
 	  "VerticalTilde",
 	  "Video",
+	  "VideoCapture",
+	  "VideoCombine",
+	  "VideoDelete",
 	  "VideoEncoding",
 	  "VideoExtractFrames",
 	  "VideoFrameList",
 	  "VideoFrameMap",
+	  "VideoGenerator",
+	  "VideoInsert",
+	  "VideoIntervals",
+	  "VideoJoin",
+	  "VideoMap",
+	  "VideoMapList",
+	  "VideoMapTimeSeries",
+	  "VideoPadding",
 	  "VideoPause",
 	  "VideoPlay",
 	  "VideoQ",
+	  "VideoRecord",
+	  "VideoReplace",
+	  "VideoScreenCapture",
+	  "VideoSplit",
 	  "VideoStop",
 	  "VideoStream",
 	  "VideoStreams",
-	  "VideoTimeSeries",
-	  "VideoTracks",
+	  "VideoTimeStretch",
+	  "VideoTrackSelection",
+	  "VideoTranscode",
+	  "VideoTransparency",
 	  "VideoTrim",
 	  "ViewAngle",
 	  "ViewCenter",
@@ -36692,6 +38325,7 @@ function requireMathematica () {
 	  "WaveletScale",
 	  "WaveletScalogram",
 	  "WaveletThreshold",
+	  "WavePDEComponent",
 	  "WeaklyConnectedComponents",
 	  "WeaklyConnectedGraphComponents",
 	  "WeaklyConnectedGraphQ",
@@ -36699,11 +38333,15 @@ function requireMathematica () {
 	  "WeatherData",
 	  "WeatherForecastData",
 	  "WebAudioSearch",
+	  "WebColumn",
 	  "WebElementObject",
 	  "WeberE",
 	  "WebExecute",
 	  "WebImage",
 	  "WebImageSearch",
+	  "WebItem",
+	  "WebPageMetaInformation",
+	  "WebRow",
 	  "WebSearch",
 	  "WebSessionObject",
 	  "WebSessions",
@@ -36745,6 +38383,7 @@ function requireMathematica () {
 	  "WhitespaceCharacter",
 	  "WhittakerM",
 	  "WhittakerW",
+	  "WholeCellGroupOpener",
 	  "WienerFilter",
 	  "WienerProcess",
 	  "WignerD",
@@ -36779,10 +38418,13 @@ function requireMathematica () {
 	  "WinsorizedVariance",
 	  "WishartMatrixDistribution",
 	  "With",
+	  "WithCleanup",
+	  "WithLock",
 	  "WolframAlpha",
 	  "WolframAlphaDate",
 	  "WolframAlphaQuantity",
 	  "WolframAlphaResult",
+	  "WolframCloudSettings",
 	  "WolframLanguageData",
 	  "Word",
 	  "WordBoundary",
@@ -36874,14 +38516,17 @@ function requireMathematica () {
 	  "$CloudWolframEngineVersionNumber",
 	  "$CommandLine",
 	  "$CompilationTarget",
+	  "$CompilerEnvironment",
 	  "$ConditionHold",
 	  "$ConfiguredKernels",
 	  "$Context",
+	  "$ContextAliases",
 	  "$ContextPath",
 	  "$ControlActiveSetting",
 	  "$Cookies",
 	  "$CookieStore",
 	  "$CreationDate",
+	  "$CryptographicEllipticCurveNames",
 	  "$CurrentLink",
 	  "$CurrentTask",
 	  "$CurrentWebSession",
@@ -36892,11 +38537,15 @@ function requireMathematica () {
 	  "$DefaultFont",
 	  "$DefaultFrontEnd",
 	  "$DefaultImagingDevice",
+	  "$DefaultKernels",
 	  "$DefaultLocalBase",
+	  "$DefaultLocalKernel",
 	  "$DefaultMailbox",
 	  "$DefaultNetworkInterface",
 	  "$DefaultPath",
 	  "$DefaultProxyRules",
+	  "$DefaultRemoteBatchSubmissionEnvironment",
+	  "$DefaultRemoteKernel",
 	  "$DefaultSystemCredentialStore",
 	  "$Display",
 	  "$DisplayFunction",
@@ -36919,6 +38568,7 @@ function requireMathematica () {
 	  "$FormatType",
 	  "$FrontEnd",
 	  "$FrontEndSession",
+	  "$GeneratedAssetLocation",
 	  "$GeoEntityTypes",
 	  "$GeoLocation",
 	  "$GeoLocationCity",
@@ -36974,6 +38624,7 @@ function requireMathematica () {
 	  "$MachineName",
 	  "$MachinePrecision",
 	  "$MachineType",
+	  "$MaxDisplayedChildren",
 	  "$MaxExtraPrecision",
 	  "$MaxLicenseProcesses",
 	  "$MaxLicenseSubprocesses",
@@ -37035,15 +38686,21 @@ function requireMathematica () {
 	  "$ProcessorType",
 	  "$ProductInformation",
 	  "$ProgramName",
+	  "$ProgressReporting",
 	  "$PublisherID",
+	  "$RandomGeneratorState",
 	  "$RandomState",
 	  "$RecursionLimit",
 	  "$RegisteredDeviceClasses",
 	  "$RegisteredUserName",
 	  "$ReleaseNumber",
 	  "$RequesterAddress",
+	  "$RequesterCloudUserID",
+	  "$RequesterCloudUserUUID",
 	  "$RequesterWolframID",
 	  "$RequesterWolframUUID",
+	  "$ResourceSystemBase",
+	  "$ResourceSystemPath",
 	  "$RootDirectory",
 	  "$ScheduledTask",
 	  "$ScriptCommandLine",
@@ -37073,6 +38730,7 @@ function requireMathematica () {
 	  "$SystemShell",
 	  "$SystemTimeZone",
 	  "$SystemWordLength",
+	  "$TargetSystems",
 	  "$TemplatePath",
 	  "$TemporaryDirectory",
 	  "$TemporaryPrefix",
@@ -37120,6 +38778,7 @@ function requireMathematica () {
 	Website: https://www.wolfram.com/mathematica/
 	Category: scientific
 	*/
+
 
 	/** @type LanguageFn */
 	function mathematica(hljs) {
@@ -38026,6 +39685,7 @@ Language: Mercury
 Author: mucaho <mkucko@gmail.com>
 Description: Mercury is a logic/functional programming language which combines the clarity and expressiveness of declarative programming with advanced static analysis and error detection features.
 Website: https://www.mercurylang.org
+Category: functional
 */
 
 var mercury_1;
@@ -38320,6 +39980,7 @@ function requirePerl () {
 	    'chown',
 	    'chr',
 	    'chroot',
+	    'class',
 	    'close',
 	    'closedir',
 	    'connect',
@@ -38349,6 +40010,7 @@ function requirePerl () {
 	    'exit',
 	    'exp',
 	    'fcntl',
+	    'field',
 	    'fileno',
 	    'flock',
 	    'for',
@@ -38408,6 +40070,7 @@ function requirePerl () {
 	    'lt',
 	    'ma',
 	    'map',
+	    'method',
 	    'mkdir',
 	    'msgctl',
 	    'msgget',
@@ -38552,19 +40215,45 @@ function requirePerl () {
 	    end: /\}/
 	    // contains defined later
 	  };
-	  const VAR = { variants: [
-	    { begin: /\$\d/ },
-	    { begin: regex.concat(
-	      /[$%@](\^\w\b|#\w+(::\w+)*|\{\w+\}|\w+(::\w*)*)/,
-	      // negative look-ahead tries to avoid matching patterns that are not
-	      // Perl at all like $ident$, @ident@, etc.
-	      `(?![A-Za-z])(?![@$%])`
-	    ) },
-	    {
-	      begin: /[$%@][^\s\w{]/,
-	      relevance: 0
-	    }
-	  ] };
+	  const ATTR = {
+	    scope: 'attr',
+	    match: /\s+:\s*\w+(\s*\(.*?\))?/,
+	  };
+	  const VAR = {
+	    scope: 'variable',
+	    variants: [
+	      { begin: /\$\d/ },
+	      { begin: regex.concat(
+	        /[$%@](?!")(\^\w\b|#\w+(::\w+)*|\{\w+\}|\w+(::\w*)*)/,
+	        // negative look-ahead tries to avoid matching patterns that are not
+	        // Perl at all like $ident$, @ident@, etc.
+	        `(?![A-Za-z])(?![@$%])`
+	        )
+	      },
+	      {
+	        // Only $= is a special Perl variable and one can't declare @= or %=.
+	        begin: /[$%@](?!")[^\s\w{=]|\$=/,
+	        relevance: 0
+	      }
+	    ],
+	    contains: [ ATTR ],
+	  };
+	  const NUMBER = {
+	    className: 'number',
+	    variants: [
+	      // decimal numbers:
+	      // include the case where a number starts with a dot (eg. .9), and
+	      // the leading 0? avoids mixing the first and second match on 0.x cases
+	      { match: /0?\.[0-9][0-9_]+\b/ },
+	      // include the special versioned number (eg. v5.38)
+	      { match: /\bv?(0|[1-9][0-9_]*(\.[0-9_]+)?|[1-9][0-9_]*)\b/ },
+	      // non-decimal numbers:
+	      { match: /\b0[0-7][0-7_]*\b/ },
+	      { match: /\b0x[0-9a-fA-F][0-9a-fA-F_]*\b/ },
+	      { match: /\b0b[0-1][0-1_]*\b/ },
+	    ],
+	    relevance: 0
+	  };
 	  const STRING_CONTAINS = [
 	    hljs.BACKSLASH_ESCAPE,
 	    SUBST,
@@ -38679,11 +40368,7 @@ function requirePerl () {
 	        }
 	      ]
 	    },
-	    {
-	      className: 'number',
-	      begin: '(\\b0[0-7_]+)|(\\b0x[0-9a-fA-F_]+)|(\\b[1-9][0-9_]*(\\.[0-9_]+)?)|[0_]\\b',
-	      relevance: 0
-	    },
+	    NUMBER,
 	    { // regexp container
 	      begin: '(\\/\\/|' + hljs.RE_STARTERS_RE + '|\\b(split|return|print|reverse|grep)\\b)\\s*',
 	      keywords: 'split return print reverse grep',
@@ -38725,11 +40410,19 @@ function requirePerl () {
 	    },
 	    {
 	      className: 'function',
-	      beginKeywords: 'sub',
+	      beginKeywords: 'sub method',
 	      end: '(\\s*\\(.*?\\))?[;{]',
 	      excludeEnd: true,
 	      relevance: 5,
-	      contains: [ hljs.TITLE_MODE ]
+	      contains: [ hljs.TITLE_MODE, ATTR ]
+	    },
+	    {
+	      className: 'class',
+	      beginKeywords: 'class',
+	      end: '[;{]',
+	      excludeEnd: true,
+	      relevance: 5,
+	      contains: [ hljs.TITLE_MODE, ATTR, NUMBER ]
 	    },
 	    {
 	      begin: '-\\w\\b',
@@ -38817,6 +40510,7 @@ Language: Monkey
 Description: Monkey2 is an easy to use, cross platform, games oriented programming language from Blitz Research.
 Author: Arthur Bikmullin <devolonter@gmail.com>
 Website: https://blitzresearch.itch.io/monkey2
+Category: gaming
 */
 
 var monkey_1;
@@ -39160,6 +40854,7 @@ function requireMoonscript () {
  Contributors: Rene Saarsoo <nene@triin.net>
  Description: Couchbase query language
  Website: https://www.couchbase.com/products/n1ql
+ Category: database
  */
 
 var n1ql_1;
@@ -39980,6 +41675,7 @@ Language: Nix
 Author: Domen Kožar <domen@dev.si>
 Description: Nix functional language
 Website: http://nixos.org/nix
+Category: system
 */
 
 var nix_1;
@@ -40028,6 +41724,10 @@ function requireNix () {
 	    end: /\}/,
 	    keywords: KEYWORDS
 	  };
+	  const ESCAPED_DOLLAR = {
+	    className: 'char.escape',
+	    begin: /''\$/,
+	  };
 	  const ATTRS = {
 	    begin: /[a-zA-Z0-9-_]+(\s*=)/,
 	    returnBegin: true,
@@ -40042,7 +41742,7 @@ function requireNix () {
 	  };
 	  const STRING = {
 	    className: 'string',
-	    contains: [ ANTIQUOTE ],
+	    contains: [ ESCAPED_DOLLAR, ANTIQUOTE ],
 	    variants: [
 	      {
 	        begin: "''",
@@ -40121,6 +41821,7 @@ Language: NSIS
 Description: Nullsoft Scriptable Install System
 Author: Jan T. Sott <jan.sott@gmail.com>
 Website: https://nsis.sourceforge.io/Main_Page
+Category: scripting
 */
 
 var nsis_1;
@@ -40236,6 +41937,7 @@ function requireNsis () {
 	    "addincludedir",
 	    "addplugindir",
 	    "appendfile",
+	    "assert",
 	    "cd",
 	    "define",
 	    "delfile",
@@ -41124,6 +42826,7 @@ Language: Oxygene
 Author: Carlo Kok <ck@remobjects.com>
 Description: Oxygene is built on the foundation of Object Pascal, revamped and extended to be a modern language for the twenty-first century.
 Website: https://www.elementscompiler.com/elements/default.aspx
+Category: build-system
 */
 
 var oxygene_1;
@@ -41363,6 +43066,7 @@ Description:
     - Function names deliberately are not highlighted. There is no way to tell function
       call from other constructs, hence we can't highlight _all_ function names. And
       some names highlighted while others not looks ugly.
+Category: database
 */
 
 var pgsql_1;
@@ -41939,10 +43643,18 @@ function requirePhp () {
 	    illegal: null,
 	    contains: hljs.QUOTE_STRING_MODE.contains.concat(SUBST),
 	  });
-	  const HEREDOC = hljs.END_SAME_AS_BEGIN({
-	    begin: /<<<[ \t]*(\w+)\n/,
+
+	  const HEREDOC = {
+	    begin: /<<<[ \t]*(?:(\w+)|"(\w+)")\n/,
 	    end: /[ \t]*(\w+)\b/,
 	    contains: hljs.QUOTE_STRING_MODE.contains.concat(SUBST),
+	    'on:begin': (m, resp) => { resp.data._beginMatch = m[1] || m[2]; },
+	    'on:end': (m, resp) => { if (resp.data._beginMatch !== m[1]) resp.ignoreMatch(); },
+	  };
+
+	  const NOWDOC = hljs.END_SAME_AS_BEGIN({
+	    begin: /<<<[ \t]*'(\w+)'\n/,
+	    end: /[ \t]*(\w+)\b/,
 	  });
 	  // list of valid whitespaces because non-breaking space might be part of a IDENT_RE
 	  const WHITESPACE = '[ \t\n]';
@@ -41951,7 +43663,8 @@ function requirePhp () {
 	    variants: [
 	      DOUBLE_QUOTED,
 	      SINGLE_QUOTED,
-	      HEREDOC
+	      HEREDOC,
+	      NOWDOC
 	    ]
 	  };
 	  const NUMBER = {
@@ -42590,6 +44303,7 @@ Author: Joe Eli McIlvain <joe.eli.mac@gmail.com>
 Description: Pony is an open-source, object-oriented, actor-model,
              capabilities-secure, high performance programming language.
 Website: https://www.ponylang.io
+Category: system
 */
 
 var pony_1;
@@ -42688,6 +44402,7 @@ Description: PowerShell is a task-based command-line shell and scripting languag
 Author: David Mohundro <david@mohundro.com>
 Contributors: Nicholas Blumhardt <nblumhardt@nblumhardt.com>, Victor Zhou <OiCMudkips@users.noreply.github.com>, Nicolas Le Gall <contact@nlegall.fr>
 Website: https://docs.microsoft.com/en-us/powershell/
+Category: scripting
 */
 
 var powershell_1;
@@ -43507,6 +45222,7 @@ Language: Prolog
 Description: Prolog is a general purpose logic programming language associated with artificial intelligence and computational linguistics.
 Author: Raivo Laanemets <raivo@infdot.com>
 Website: https://en.wikipedia.org/wiki/Prolog
+Category: functional
 */
 
 var prolog_1;
@@ -43739,6 +45455,7 @@ function requireProtobuf () {
 
 	  return {
 	    name: 'Protocol Buffers',
+	    aliases: ['proto'],
 	    keywords: {
 	      keyword: KEYWORDS,
 	      type: TYPES,
@@ -43932,6 +45649,7 @@ Author: Tristano Ajmone <tajmone@gmail.com>
 Description: Syntax highlighting for PureBASIC (v.5.00-5.60). No inline ASM highlighting. (v.1.2, May 2017)
 Credits: I've taken inspiration from the PureBasic language file for GeSHi, created by Gustavo Julio Fiorenza (GuShH).
 Website: https://www.purebasic.com
+Category: system
 */
 
 var purebasic_1;
@@ -44057,6 +45775,7 @@ function requirePython () {
 	    'async',
 	    'await',
 	    'break',
+	    'case',
 	    'class',
 	    'continue',
 	    'def',
@@ -44073,6 +45792,7 @@ function requirePython () {
 	    'in',
 	    'is',
 	    'lambda',
+	    'match',
 	    'nonlocal|10',
 	    'not',
 	    'or',
@@ -44407,13 +46127,14 @@ function requirePython () {
 	    ],
 	    unicodeRegex: true,
 	    keywords: KEYWORDS,
-	    illegal: /(<\/|->|\?)|=>/,
+	    illegal: /(<\/|\?)|=>/,
 	    contains: [
 	      PROMPT,
 	      NUMBER,
 	      {
 	        // very common convention
-	        begin: /\bself\b/
+	        scope: 'variable.language',
+	        match: /\bself\b/
 	      },
 	      {
 	        // eat "if" prior to string so that it won't accidentally be
@@ -44421,6 +46142,7 @@ function requirePython () {
 	        beginKeywords: "if",
 	        relevance: 0
 	      },
+	      { match: /\bor\b/, scope: "keyword" },
 	      STRING,
 	      COMMENT_TYPE,
 	      hljs.HASH_COMMENT_MODE,
@@ -44522,6 +46244,7 @@ Description: Q is a vector-based functional paradigm programming language built 
              (K/Q/Kdb+ from Kx Systems)
 Author: Sergey Vidyuk <svidyuk@gmail.com>
 Website: https://kx.com/connect-with-us/developers/
+Category: enterprise, functional, database
 */
 
 var q_1;
@@ -45041,301 +46764,135 @@ function requireReasonml () {
 	if (hasRequiredReasonml) return reasonml_1;
 	hasRequiredReasonml = 1;
 	function reasonml(hljs) {
-	  function orReValues(ops) {
-	    return ops
-	      .map(function(op) {
-	        return op
-	          .split('')
-	          .map(function(char) {
-	            return '\\' + char;
-	          })
-	          .join('');
-	      })
-	      .join('|');
-	  }
-
-	  const RE_IDENT = '~?[a-z$_][0-9a-zA-Z$_]*';
-	  const RE_MODULE_IDENT = '`?[A-Z$_][0-9a-zA-Z$_]*';
-
-	  const RE_PARAM_TYPEPARAM = '\'?[a-z$_][0-9a-z$_]*';
-	  const RE_PARAM_TYPE = '\\s*:\\s*[a-z$_][0-9a-z$_]*(\\(\\s*(' + RE_PARAM_TYPEPARAM + '\\s*(,' + RE_PARAM_TYPEPARAM + '\\s*)*)?\\))?';
-	  const RE_PARAM = RE_IDENT + '(' + RE_PARAM_TYPE + '){0,2}';
-	  const RE_OPERATOR = "(" + orReValues([
-	    '||',
-	    '++',
-	    '**',
-	    '+.',
-	    '*',
-	    '/',
-	    '*.',
-	    '/.',
-	    '...'
-	  ]) + "|\\|>|&&|==|===)";
-	  const RE_OPERATOR_SPACED = "\\s+" + RE_OPERATOR + "\\s+";
-
-	  const KEYWORDS = {
-	    keyword:
-	      'and as asr assert begin class constraint do done downto else end exception external '
-	      + 'for fun function functor if in include inherit initializer '
-	      + 'land lazy let lor lsl lsr lxor match method mod module mutable new nonrec '
-	      + 'object of open or private rec sig struct then to try type val virtual when while with',
-	    built_in:
-	      'array bool bytes char exn|5 float int int32 int64 list lazy_t|5 nativeint|5 ref string unit ',
-	    literal:
-	      'true false'
-	  };
-
-	  const RE_NUMBER = '\\b(0[xX][a-fA-F0-9_]+[Lln]?|'
-	    + '0[oO][0-7_]+[Lln]?|'
-	    + '0[bB][01_]+[Lln]?|'
-	    + '[0-9][0-9_]*([Lln]|(\\.[0-9_]*)?([eE][-+]?[0-9_]+)?)?)';
-
-	  const NUMBER_MODE = {
-	    className: 'number',
-	    relevance: 0,
-	    variants: [
-	      { begin: RE_NUMBER },
-	      { begin: '\\(-' + RE_NUMBER + '\\)' }
-	    ]
-	  };
-
-	  const OPERATOR_MODE = {
-	    className: 'operator',
-	    relevance: 0,
-	    begin: RE_OPERATOR
-	  };
-	  const LIST_CONTENTS_MODES = [
-	    {
-	      className: 'identifier',
-	      relevance: 0,
-	      begin: RE_IDENT
-	    },
-	    OPERATOR_MODE,
-	    NUMBER_MODE
+	  const BUILT_IN_TYPES = [
+	    "array",
+	    "bool",
+	    "bytes",
+	    "char",
+	    "exn|5",
+	    "float",
+	    "int",
+	    "int32",
+	    "int64",
+	    "list",
+	    "lazy_t|5",
+	    "nativeint|5",
+	    "ref",
+	    "string",
+	    "unit",
 	  ];
-
-	  const MODULE_ACCESS_CONTENTS = [
-	    hljs.QUOTE_STRING_MODE,
-	    OPERATOR_MODE,
-	    {
-	      className: 'module',
-	      begin: "\\b" + RE_MODULE_IDENT,
-	      returnBegin: true,
-	      relevance: 0,
-	      end: "\.",
-	      contains: [
-	        {
-	          className: 'identifier',
-	          begin: RE_MODULE_IDENT,
-	          relevance: 0
-	        }
-	      ]
-	    }
-	  ];
-
-	  const PARAMS_CONTENTS = [
-	    {
-	      className: 'module',
-	      begin: "\\b" + RE_MODULE_IDENT,
-	      returnBegin: true,
-	      end: "\.",
-	      relevance: 0,
-	      contains: [
-	        {
-	          className: 'identifier',
-	          begin: RE_MODULE_IDENT,
-	          relevance: 0
-	        }
-	      ]
-	    }
-	  ];
-
-	  const PARAMS_MODE = {
-	    begin: RE_IDENT,
-	    end: '(,|\\n|\\))',
-	    relevance: 0,
-	    contains: [
-	      OPERATOR_MODE,
-	      {
-	        className: 'typing',
-	        begin: ':',
-	        end: '(,|\\n)',
-	        returnBegin: true,
-	        relevance: 0,
-	        contains: PARAMS_CONTENTS
-	      }
-	    ]
-	  };
-
-	  const FUNCTION_BLOCK_MODE = {
-	    className: 'function',
-	    relevance: 0,
-	    keywords: KEYWORDS,
-	    variants: [
-	      {
-	        begin: '\\s(\\(\\.?.*?\\)|' + RE_IDENT + ')\\s*=>',
-	        end: '\\s*=>',
-	        returnBegin: true,
-	        relevance: 0,
-	        contains: [
-	          {
-	            className: 'params',
-	            variants: [
-	              { begin: RE_IDENT },
-	              { begin: RE_PARAM },
-	              { begin: /\(\s*\)/ }
-	            ]
-	          }
-	        ]
-	      },
-	      {
-	        begin: '\\s\\(\\.?[^;\\|]*\\)\\s*=>',
-	        end: '\\s=>',
-	        returnBegin: true,
-	        relevance: 0,
-	        contains: [
-	          {
-	            className: 'params',
-	            relevance: 0,
-	            variants: [ PARAMS_MODE ]
-	          }
-	        ]
-	      },
-	      { begin: '\\(\\.\\s' + RE_IDENT + '\\)\\s*=>' }
-	    ]
-	  };
-	  MODULE_ACCESS_CONTENTS.push(FUNCTION_BLOCK_MODE);
-
-	  const CONSTRUCTOR_MODE = {
-	    className: 'constructor',
-	    begin: RE_MODULE_IDENT + '\\(',
-	    end: '\\)',
-	    illegal: '\\n',
-	    keywords: KEYWORDS,
-	    contains: [
-	      hljs.QUOTE_STRING_MODE,
-	      OPERATOR_MODE,
-	      {
-	        className: 'params',
-	        begin: '\\b' + RE_IDENT
-	      }
-	    ]
-	  };
-
-	  const PATTERN_MATCH_BLOCK_MODE = {
-	    className: 'pattern-match',
-	    begin: '\\|',
-	    returnBegin: true,
-	    keywords: KEYWORDS,
-	    end: '=>',
-	    relevance: 0,
-	    contains: [
-	      CONSTRUCTOR_MODE,
-	      OPERATOR_MODE,
-	      {
-	        relevance: 0,
-	        className: 'constructor',
-	        begin: RE_MODULE_IDENT
-	      }
-	    ]
-	  };
-
-	  const MODULE_ACCESS_MODE = {
-	    className: 'module-access',
-	    keywords: KEYWORDS,
-	    returnBegin: true,
-	    variants: [
-	      { begin: "\\b(" + RE_MODULE_IDENT + "\\.)+" + RE_IDENT },
-	      {
-	        begin: "\\b(" + RE_MODULE_IDENT + "\\.)+\\(",
-	        end: "\\)",
-	        returnBegin: true,
-	        contains: [
-	          FUNCTION_BLOCK_MODE,
-	          {
-	            begin: '\\(',
-	            end: '\\)',
-	            relevance: 0,
-	            skip: true
-	          }
-	        ].concat(MODULE_ACCESS_CONTENTS)
-	      },
-	      {
-	        begin: "\\b(" + RE_MODULE_IDENT + "\\.)+\\{",
-	        end: /\}/
-	      }
-	    ],
-	    contains: MODULE_ACCESS_CONTENTS
-	  };
-
-	  PARAMS_CONTENTS.push(MODULE_ACCESS_MODE);
-
 	  return {
 	    name: 'ReasonML',
 	    aliases: [ 're' ],
-	    keywords: KEYWORDS,
-	    illegal: '(:-|:=|\\$\\{|\\+=)',
+	    keywords: {
+	      $pattern:  /[a-z_]\w*!?/,
+	      keyword: [
+	        "and",
+	        "as",
+	        "asr",
+	        "assert",
+	        "begin",
+	        "class",
+	        "constraint",
+	        "do",
+	        "done",
+	        "downto",
+	        "else",
+	        "end",
+	        "esfun",
+	        "exception",
+	        "external",
+	        "for",
+	        "fun",
+	        "function",
+	        "functor",
+	        "if",
+	        "in",
+	        "include",
+	        "inherit",
+	        "initializer",
+	        "land",
+	        "lazy",
+	        "let",
+	        "lor",
+	        "lsl",
+	        "lsr",
+	        "lxor",
+	        "mod",
+	        "module",
+	        "mutable",
+	        "new",
+	        "nonrec",
+	        "object",
+	        "of",
+	        "open",
+	        "or",
+	        "pri",
+	        "pub",
+	        "rec",
+	        "sig",
+	        "struct",
+	        "switch",
+	        "then",
+	        "to",
+	        "try",
+	        "type",
+	        "val",
+	        "virtual",
+	        "when",
+	        "while",
+	        "with",
+	      ],
+	      built_in: BUILT_IN_TYPES,
+	      literal: ["true", "false"],
+	    },
+	    illegal: /(:-|:=|\$\{|\+=)/,
 	    contains: [
-	      hljs.COMMENT('/\\*', '\\*/', { illegal: '^(#,\\/\\/)' }),
 	      {
-	        className: 'character',
-	        begin: '\'(\\\\[^\']+|[^\'])\'',
-	        illegal: '\\n',
+	        scope: 'literal',
+	        match: /\[(\|\|)?\]|\(\)/,
 	        relevance: 0
 	      },
-	      hljs.QUOTE_STRING_MODE,
-	      {
-	        className: 'literal',
-	        begin: '\\(\\)',
-	        relevance: 0
-	      },
-	      {
-	        className: 'literal',
-	        begin: '\\[\\|',
-	        end: '\\|\\]',
-	        relevance: 0,
-	        contains: LIST_CONTENTS_MODES
-	      },
-	      {
-	        className: 'literal',
-	        begin: '\\[',
-	        end: '\\]',
-	        relevance: 0,
-	        contains: LIST_CONTENTS_MODES
-	      },
-	      CONSTRUCTOR_MODE,
-	      {
-	        className: 'operator',
-	        begin: RE_OPERATOR_SPACED,
-	        illegal: '-->',
-	        relevance: 0
-	      },
-	      NUMBER_MODE,
 	      hljs.C_LINE_COMMENT_MODE,
-	      PATTERN_MATCH_BLOCK_MODE,
-	      FUNCTION_BLOCK_MODE,
-	      {
-	        className: 'module-def',
-	        begin: "\\bmodule\\s+" + RE_IDENT + "\\s+" + RE_MODULE_IDENT + "\\s+=\\s+\\{",
-	        end: /\}/,
-	        returnBegin: true,
-	        keywords: KEYWORDS,
-	        relevance: 0,
-	        contains: [
-	          {
-	            className: 'module',
-	            relevance: 0,
-	            begin: RE_MODULE_IDENT
-	          },
-	          {
-	            begin: /\{/,
-	            end: /\}/,
-	            relevance: 0,
-	            skip: true
-	          }
-	        ].concat(MODULE_ACCESS_CONTENTS)
+	      hljs.COMMENT(/\/\*/, /\*\//, { illegal: /^(#,\/\/)/ }),
+	      { /* type variable */
+	        scope: 'symbol',
+	        match: /\'[A-Za-z_](?!\')[\w\']*/
+	        /* the grammar is ambiguous on how 'a'b should be interpreted but not the compiler */
 	      },
-	      MODULE_ACCESS_MODE
+	      { /* polymorphic variant */
+	        scope: 'type',
+	        match: /`[A-Z][\w\']*/
+	      },
+	      { /* module or constructor */
+	        scope: 'type',
+	        match: /\b[A-Z][\w\']*/,
+	        relevance: 0
+	      },
+	      { /* don't color identifiers, but safely catch all identifiers with ' */
+	      match: /[a-z_]\w*\'[\w\']*/,
+	        relevance: 0
+	      },
+	      {
+	        scope: 'operator',
+	        match: /\s+(\|\||\+[\+\.]?|\*[\*\/\.]?|\/[\.]?|\.\.\.|\|>|&&|===?)\s+/,
+	        relevance: 0
+	      },      
+	      hljs.inherit(hljs.APOS_STRING_MODE, {
+	        scope: 'string',
+	        relevance: 0
+	      }),
+	      hljs.inherit(hljs.QUOTE_STRING_MODE, { illegal: null }),
+	      {
+	        scope: 'number',
+	        variants: [
+	          { match: /\b0[xX][a-fA-F0-9_]+[Lln]?/ },
+	          { match: /\b0[oO][0-7_]+[Lln]?/ },
+	          { match: /\b0[bB][01_]+[Lln]?/ },
+	          { match: /\b[0-9][0-9_]*([Lln]|(\.[0-9_]*)?([eE][-+]?[0-9_]+)?)/ },
+	        ],
+	        relevance: 0
+	      },
 	    ]
 	  };
 	}
@@ -45482,10 +47039,11 @@ function requireRoboconf () {
 }
 
 /*
-Language: Microtik RouterOS script
+Language: MikroTik RouterOS script
 Author: Ivan Dementev <ivan_div@mail.ru>
 Description: Scripting host provides a way to automate some router maintenance tasks by means of executing user-defined scripts bounded to some event occurrence
 Website: https://wiki.mikrotik.com/wiki/Manual:Scripting
+Category: scripting
 */
 
 var routeros_1;
@@ -45544,7 +47102,7 @@ function requireRouteros () {
 	  };
 
 	  return {
-	    name: 'Microtik RouterOS script',
+	    name: 'MikroTik RouterOS script',
 	    aliases: [ 'mikrotik' ],
 	    case_insensitive: true,
 	    keywords: {
@@ -45911,15 +47469,22 @@ function requireRust () {
 	if (hasRequiredRust) return rust_1;
 	hasRequiredRust = 1;
 	/** @type LanguageFn */
+
 	function rust(hljs) {
 	  const regex = hljs.regex;
+	  // ============================================
+	  // Added to support the r# keyword, which is a raw identifier in Rust.
+	  const RAW_IDENTIFIER = /(r#)?/;
+	  const UNDERSCORE_IDENT_RE = regex.concat(RAW_IDENTIFIER, hljs.UNDERSCORE_IDENT_RE);
+	  const IDENT_RE = regex.concat(RAW_IDENTIFIER, hljs.IDENT_RE);
+	  // ============================================
 	  const FUNCTION_INVOKE = {
 	    className: "title.function.invoke",
 	    relevance: 0,
 	    begin: regex.concat(
 	      /\b/,
-	      /(?!let\b)/,
-	      hljs.IDENT_RE,
+	      /(?!let|for|while|if|else|match\b)/,
+	      IDENT_RE,
 	      regex.lookahead(/\s*\(/))
 	  };
 	  const NUMBER_SUFFIX = '([ui](8|16|32|64|128|size)|f(32|64))\?';
@@ -45968,6 +47533,7 @@ function requireRust () {
 	    "try",
 	    "type",
 	    "typeof",
+	    "union",
 	    "unsafe",
 	    "unsized",
 	    "use",
@@ -46027,11 +47593,12 @@ function requireRust () {
 	    "debug_assert!",
 	    "debug_assert_eq!",
 	    "env!",
+	    "eprintln!",
 	    "panic!",
 	    "file!",
 	    "format!",
 	    "format_args!",
-	    "include_bin!",
+	    "include_bytes!",
 	    "include_str!",
 	    "line!",
 	    "local_data_key!",
@@ -46119,7 +47686,7 @@ function requireRust () {
 	        begin: [
 	          /fn/,
 	          /\s+/,
-	          hljs.UNDERSCORE_IDENT_RE
+	          UNDERSCORE_IDENT_RE
 	        ],
 	        className: {
 	          1: "keyword",
@@ -46134,7 +47701,10 @@ function requireRust () {
 	          {
 	            className: 'string',
 	            begin: /"/,
-	            end: /"/
+	            end: /"/,
+	            contains: [
+	              hljs.BACKSLASH_ESCAPE
+	            ]
 	          }
 	        ]
 	      },
@@ -46143,7 +47713,7 @@ function requireRust () {
 	          /let/,
 	          /\s+/,
 	          /(?:mut\s+)?/,
-	          hljs.UNDERSCORE_IDENT_RE
+	          UNDERSCORE_IDENT_RE
 	        ],
 	        className: {
 	          1: "keyword",
@@ -46156,7 +47726,7 @@ function requireRust () {
 	        begin: [
 	          /for/,
 	          /\s+/,
-	          hljs.UNDERSCORE_IDENT_RE,
+	          UNDERSCORE_IDENT_RE,
 	          /\s+/,
 	          /in/
 	        ],
@@ -46170,7 +47740,7 @@ function requireRust () {
 	        begin: [
 	          /type/,
 	          /\s+/,
-	          hljs.UNDERSCORE_IDENT_RE
+	          UNDERSCORE_IDENT_RE
 	        ],
 	        className: {
 	          1: "keyword",
@@ -46181,7 +47751,7 @@ function requireRust () {
 	        begin: [
 	          /(?:trait|enum|struct|union|impl|for)/,
 	          /\s+/,
-	          hljs.UNDERSCORE_IDENT_RE
+	          UNDERSCORE_IDENT_RE
 	        ],
 	        className: {
 	          1: "keyword",
@@ -46192,7 +47762,8 @@ function requireRust () {
 	        begin: hljs.IDENT_RE + '::',
 	        keywords: {
 	          keyword: "Self",
-	          built_in: BUILTINS
+	          built_in: BUILTINS,
+	          type: TYPES
 	        }
 	      },
 	      {
@@ -46212,6 +47783,7 @@ function requireRust () {
 Language: SAS
 Author: Mauricio Caceres <mauricio.caceres.bravo@gmail.com>
 Description: Syntax Highlighting for SAS
+Category: scientific
 */
 
 var sas_1;
@@ -46869,7 +48441,11 @@ function requireScala () {
 	        excludeBegin: true,
 	        excludeEnd: true,
 	        relevance: 0,
-	        contains: [ TYPE ]
+	        contains: [ 
+	          TYPE, 
+	          hljs.C_LINE_COMMENT_MODE, 
+	          hljs.C_BLOCK_COMMENT_MODE, 
+	        ]
 	      },
 	      {
 	        className: 'params',
@@ -46878,7 +48454,11 @@ function requireScala () {
 	        excludeBegin: true,
 	        excludeEnd: true,
 	        relevance: 0,
-	        contains: [ TYPE ]
+	        contains: [ 
+	          TYPE, 
+	          hljs.C_LINE_COMMENT_MODE, 
+	          hljs.C_BLOCK_COMMENT_MODE, 
+	        ]
 	      },
 	      NAME
 	    ]
@@ -46900,20 +48480,18 @@ function requireScala () {
 	    beginScope: { 2: "keyword", }
 	  };
 
-	  const END = [
-	    {
-	      begin: [
-	        /^\s*/, // Is first token on the line
-	        /end/,
-	        /\s+/,
-	        /(extension\b)?/, // `extension` is the only marker that follows an `end` that cannot be captured by another rule.
-	      ],
-	      beginScope: {
-	        2: "keyword",
-	        4: "keyword",
-	      }
+	  const END = {
+	    begin: [
+	      /^\s*/, // Is first token on the line
+	      /end/,
+	      /\s+/,
+	      /(extension\b)?/, // `extension` is the only marker that follows an `end` that cannot be captured by another rule.
+	    ],
+	    beginScope: {
+	      2: "keyword",
+	      4: "keyword",
 	    }
-	  ];
+	  };
 
 	  // TODO: use negative look-behind in future
 	  //       /(?<!\.)\binline(?=\s)/
@@ -46934,13 +48512,42 @@ function requireScala () {
 	    beginScope: { 2: "keyword", }
 	  };
 
+	  // glob all non-whitespace characters as a "string"
+	  // sourced from https://github.com/scala/docs.scala-lang/pull/2845
+	  const DIRECTIVE_VALUE = {
+	    className: 'string',
+	    begin: /\S+/,
+	  };
+
+	  // directives
+	  // sourced from https://github.com/scala/docs.scala-lang/pull/2845
+	  const USING_DIRECTIVE = {
+	    begin: [
+	      '//>',
+	      /\s+/,
+	      /using/,
+	      /\s+/,
+	      /\S+/
+	    ],
+	    beginScope: {
+	      1: "comment",
+	      3: "keyword",
+	      5: "type"
+	    },
+	    end: /$/,
+	    contains: [
+	      DIRECTIVE_VALUE,
+	    ]
+	  };
+
 	  return {
 	    name: 'Scala',
 	    keywords: {
 	      literal: 'true false null',
-	      keyword: 'type yield lazy override def with val var sealed abstract private trait object if then forSome for while do throw finally protected extends import final return else break new catch super class case package default try this match continue throws implicit export enum given'
+	      keyword: 'type yield lazy override def with val var sealed abstract private trait object if then forSome for while do throw finally protected extends import final return else break new catch super class case package default try this match continue throws implicit export enum given transparent'
 	    },
 	    contains: [
+	      USING_DIRECTIVE,
 	      hljs.C_LINE_COMMENT_MODE,
 	      hljs.C_BLOCK_COMMENT_MODE,
 	      STRING,
@@ -47149,6 +48756,7 @@ function requireScheme () {
 
 	  return {
 	    name: 'Scheme',
+	    aliases: ['scm'],
 	    illegal: /\S/,
 	    contains: [
 	      hljs.SHEBANG(),
@@ -47293,12 +48901,12 @@ function requireScss () {
 	    },
 	    CSS_VARIABLE: {
 	      className: "attr",
-	      begin: /--[A-Za-z][A-Za-z0-9_-]*/
+	      begin: /--[A-Za-z_][A-Za-z0-9_-]*/
 	    }
 	  };
 	};
 
-	const TAGS = [
+	const HTML_TAGS = [
 	  'a',
 	  'abbr',
 	  'address',
@@ -47350,11 +48958,16 @@ function requireScss () {
 	  'nav',
 	  'object',
 	  'ol',
+	  'optgroup',
+	  'option',
 	  'p',
+	  'picture',
 	  'q',
 	  'quote',
 	  'samp',
 	  'section',
+	  'select',
+	  'source',
 	  'span',
 	  'strong',
 	  'summary',
@@ -47372,6 +48985,58 @@ function requireScss () {
 	  'var',
 	  'video'
 	];
+
+	const SVG_TAGS = [
+	  'defs',
+	  'g',
+	  'marker',
+	  'mask',
+	  'pattern',
+	  'svg',
+	  'switch',
+	  'symbol',
+	  'feBlend',
+	  'feColorMatrix',
+	  'feComponentTransfer',
+	  'feComposite',
+	  'feConvolveMatrix',
+	  'feDiffuseLighting',
+	  'feDisplacementMap',
+	  'feFlood',
+	  'feGaussianBlur',
+	  'feImage',
+	  'feMerge',
+	  'feMorphology',
+	  'feOffset',
+	  'feSpecularLighting',
+	  'feTile',
+	  'feTurbulence',
+	  'linearGradient',
+	  'radialGradient',
+	  'stop',
+	  'circle',
+	  'ellipse',
+	  'image',
+	  'line',
+	  'path',
+	  'polygon',
+	  'polyline',
+	  'rect',
+	  'text',
+	  'use',
+	  'textPath',
+	  'tspan',
+	  'foreignObject',
+	  'clipPath'
+	];
+
+	const TAGS = [
+	  ...HTML_TAGS,
+	  ...SVG_TAGS,
+	];
+
+	// Sorting, then reversing makes sure longer attributes/elements like
+	// `font-weight` are matched fully instead of getting false positives on say `font`
 
 	const MEDIA_FEATURES = [
 	  'any-hover',
@@ -47408,7 +49073,7 @@ function requireScss () {
 	  'max-width',
 	  'min-height',
 	  'max-height'
-	];
+	].sort().reverse();
 
 	// https://developer.mozilla.org/en-US/docs/Web/CSS/Pseudo-classes
 	const PSEUDO_CLASSES = [
@@ -47471,7 +49136,7 @@ function requireScss () {
 	  'valid',
 	  'visited',
 	  'where' // where()
-	];
+	].sort().reverse();
 
 	// https://developer.mozilla.org/en-US/docs/Web/CSS/Pseudo-elements
 	const PSEUDO_ELEMENTS = [
@@ -47489,12 +49154,14 @@ function requireScss () {
 	  'selection',
 	  'slotted',
 	  'spelling-error'
-	];
+	].sort().reverse();
 
 	const ATTRIBUTES = [
+	  'accent-color',
 	  'align-content',
 	  'align-items',
 	  'align-self',
+	  'alignment-baseline',
 	  'all',
 	  'animation',
 	  'animation-delay',
@@ -47505,6 +49172,7 @@ function requireScss () {
 	  'animation-name',
 	  'animation-play-state',
 	  'animation-timing-function',
+	  'appearance',
 	  'backface-visibility',
 	  'background',
 	  'background-attachment',
@@ -47516,6 +49184,7 @@ function requireScss () {
 	  'background-position',
 	  'background-repeat',
 	  'background-size',
+	  'baseline-shift',
 	  'block-size',
 	  'border',
 	  'border-block',
@@ -47562,10 +49231,14 @@ function requireScss () {
 	  'border-left-width',
 	  'border-radius',
 	  'border-right',
+	  'border-end-end-radius',
+	  'border-end-start-radius',
 	  'border-right-color',
 	  'border-right-style',
 	  'border-right-width',
 	  'border-spacing',
+	  'border-start-end-radius',
+	  'border-start-start-radius',
 	  'border-style',
 	  'border-top',
 	  'border-top-color',
@@ -47581,6 +49254,8 @@ function requireScss () {
 	  'break-after',
 	  'break-before',
 	  'break-inside',
+	  'cx',
+	  'cy',
 	  'caption-side',
 	  'caret-color',
 	  'clear',
@@ -47588,6 +49263,11 @@ function requireScss () {
 	  'clip-path',
 	  'clip-rule',
 	  'color',
+	  'color-interpolation',
+	  'color-interpolation-filters',
+	  'color-profile',
+	  'color-rendering',
+	  'color-scheme',
 	  'column-count',
 	  'column-fill',
 	  'column-gap',
@@ -47609,7 +49289,12 @@ function requireScss () {
 	  'cursor',
 	  'direction',
 	  'display',
+	  'dominant-baseline',
 	  'empty-cells',
+	  'enable-background',
+	  'fill',
+	  'fill-opacity',
+	  'fill-rule',
 	  'filter',
 	  'flex',
 	  'flex-basis',
@@ -47620,6 +49305,8 @@ function requireScss () {
 	  'flex-wrap',
 	  'float',
 	  'flow',
+	  'flood-color',
+	  'flood-opacity',
 	  'font',
 	  'font-display',
 	  'font-family',
@@ -47641,6 +49328,7 @@ function requireScss () {
 	  'font-variation-settings',
 	  'font-weight',
 	  'gap',
+	  'glyph-orientation-horizontal',
 	  'glyph-orientation-vertical',
 	  'grid',
 	  'grid-area',
@@ -47667,16 +49355,32 @@ function requireScss () {
 	  'image-resolution',
 	  'ime-mode',
 	  'inline-size',
+	  'inset',
+	  'inset-block',
+	  'inset-block-end',
+	  'inset-block-start',
+	  'inset-inline',
+	  'inset-inline-end',
+	  'inset-inline-start',
 	  'isolation',
+	  'kerning',
 	  'justify-content',
+	  'justify-items',
+	  'justify-self',
 	  'left',
 	  'letter-spacing',
+	  'lighting-color',
 	  'line-break',
 	  'line-height',
 	  'list-style',
 	  'list-style-image',
 	  'list-style-position',
 	  'list-style-type',
+	  'marker',
+	  'marker-end',
+	  'marker-mid',
+	  'marker-start',
+	  'mask',
 	  'margin',
 	  'margin-block',
 	  'margin-block-end',
@@ -47758,12 +49462,15 @@ function requireScss () {
 	  'pointer-events',
 	  'position',
 	  'quotes',
+	  'r',
 	  'resize',
 	  'rest',
 	  'rest-after',
 	  'rest-before',
 	  'right',
+	  'rotate',
 	  'row-gap',
+	  'scale',
 	  'scroll-margin',
 	  'scroll-margin-block',
 	  'scroll-margin-block-end',
@@ -47795,11 +49502,23 @@ function requireScss () {
 	  'shape-image-threshold',
 	  'shape-margin',
 	  'shape-outside',
+	  'shape-rendering',
+	  'stop-color',
+	  'stop-opacity',
+	  'stroke',
+	  'stroke-dasharray',
+	  'stroke-dashoffset',
+	  'stroke-linecap',
+	  'stroke-linejoin',
+	  'stroke-miterlimit',
+	  'stroke-opacity',
+	  'stroke-width',
 	  'speak',
 	  'speak-as',
 	  'src', // @font-face
 	  'tab-size',
 	  'table-layout',
+	  'text-anchor',
 	  'text-align',
 	  'text-align-all',
 	  'text-align-last',
@@ -47807,7 +49526,9 @@ function requireScss () {
 	  'text-decoration',
 	  'text-decoration-color',
 	  'text-decoration-line',
+	  'text-decoration-skip-ink',
 	  'text-decoration-style',
+	  'text-decoration-thickness',
 	  'text-emphasis',
 	  'text-emphasis-color',
 	  'text-emphasis-position',
@@ -47819,6 +49540,7 @@ function requireScss () {
 	  'text-rendering',
 	  'text-shadow',
 	  'text-transform',
+	  'text-underline-offset',
 	  'text-underline-position',
 	  'top',
 	  'transform',
@@ -47830,7 +49552,9 @@ function requireScss () {
 	  'transition-duration',
 	  'transition-property',
 	  'transition-timing-function',
+	  'translate',
 	  'unicode-bidi',
+	  'vector-effect',
 	  'vertical-align',
 	  'visibility',
 	  'voice-balance',
@@ -47849,10 +49573,10 @@ function requireScss () {
 	  'word-spacing',
 	  'word-wrap',
 	  'writing-mode',
+	  'x',
+	  'y',
 	  'z-index'
-	  // reverse makes sure longer attributes `font-weight` are matched fully
-	  // instead of getting false positives on say `font`
-	].reverse();
+	].sort().reverse();
 
 	/*
 	Language: SCSS
@@ -47861,6 +49585,7 @@ function requireScss () {
 	Website: https://sass-lang.com
 	Category: common, css, web
 	*/
+
 
 	/** @type LanguageFn */
 	function scss(hljs) {
@@ -47927,6 +49652,7 @@ function requireScss () {
 	      {
 	        begin: /:/,
 	        end: /[;}{]/,
+	        relevance: 0,
 	        contains: [
 	          modes.BLOCK_COMMENT,
 	          VARIABLE,
@@ -47934,7 +49660,8 @@ function requireScss () {
 	          modes.CSS_NUMBER_MODE,
 	          hljs.QUOTE_STRING_MODE,
 	          hljs.APOS_STRING_MODE,
-	          modes.IMPORTANT
+	          modes.IMPORTANT,
+	          modes.FUNCTION_DISPATCH
 	        ]
 	      },
 	      // matching these here allows us to treat them more like regular CSS
@@ -48028,6 +49755,7 @@ Language: Smali
 Author: Dennis Titze <dennis.titze@gmail.com>
 Description: Basic Smali highlighting
 Website: https://github.com/JesusFreke/smali
+Category: assembler
 */
 
 var smali_1;
@@ -48162,6 +49890,7 @@ Language: Smalltalk
 Description: Smalltalk is an object-oriented, dynamically typed reflective programming language.
 Author: Vladimir Gubarkov <xonixx@gmail.com>
 Website: https://en.wikipedia.org/wiki/Smalltalk
+Category: system
 */
 
 var smalltalk_1;
@@ -48322,11 +50051,11 @@ function requireSml () {
 /*
 Language: SQF
 Author: Søren Enevoldsen <senevoldsen90@gmail.com>
-Contributors: Marvin Saignat <contact@zgmrvn.com>, Dedmen Miller <dedmen@dedmen.de>
+Contributors: Marvin Saignat <contact@zgmrvn.com>, Dedmen Miller <dedmen@dedmen.de>, Leopard20
 Description: Scripting language for the Arma game series
 Website: https://community.bistudio.com/wiki/SQF_syntax
 Category: scripting
-Last update: 28.03.2021, Arma 3 v2.02
+Last update: 07.01.2023, Arma 3 v2.11
 */
 
 var sqf_1;
@@ -48335,8 +50064,38 @@ var hasRequiredSqf;
 function requireSqf () {
 	if (hasRequiredSqf) return sqf_1;
 	hasRequiredSqf = 1;
+	/*
+	////////////////////////////////////////////////////////////////////////////////////////////
+	  * Author: Leopard20
+	  
+	  * Description:
+	  This script can be used to dump all commands to the clipboard.
+	  Make sure you're using the Diag EXE to dump all of the commands.
+	  
+	  * How to use:
+	  Simply replace the _KEYWORDS and _LITERAL arrays with the one from this sqf.js file.
+	  Execute the script from the debug console.
+	  All commands will be copied to the clipboard.
+	////////////////////////////////////////////////////////////////////////////////////////////
+	_KEYWORDS = ['if'];                                                //Array of all KEYWORDS
+	_LITERALS = ['west'];                                              //Array of all LITERALS
+	_allCommands = createHashMap;
+	{
+	  _type = _x select [0,1];
+	  if (_type != "t") then {
+	    _command_lowercase = ((_x select [2]) splitString " ")#(((["n", "u", "b"] find _type) - 1) max 0);
+	    _command_uppercase = supportInfo ("i:" + _command_lowercase) # 0 # 2;
+	    _allCommands set [_command_lowercase, _command_uppercase];
+	  };
+	} forEach supportInfo "";
+	_allCommands = _allCommands toArray false;
+	_allCommands sort true;                                            //sort by lowercase
+	_allCommands = ((_allCommands apply {_x#1}) -_KEYWORDS)-_LITERALS; //remove KEYWORDS and LITERALS
+	copyToClipboard (str (_allCommands select {_x regexMatch "\w+"}) regexReplace ["""", "'"] regexReplace [",", ",\n"]);
+	*/
+
 	function sqf(hljs) {
-	  // In SQF, a variable start with _
+	  // In SQF, a local variable starts with _
 	  const VARIABLE = {
 	    className: 'variable',
 	    begin: /\b_+[a-zA-Z]\w*/
@@ -48346,7 +50105,7 @@ function requireSqf () {
 	  // https://community.bistudio.com/wiki/Functions_Library_(Arma_3)#Adding_a_Function
 	  const FUNCTION = {
 	    className: 'title',
-	    begin: /[a-zA-Z]\w+_fnc_\w+/
+	    begin: /[a-zA-Z][a-zA-Z_0-9]*_fnc_[a-zA-Z_0-9]+/
 	  };
 
 	  // In SQF strings, quotes matching the start are escaped by adding a consecutive.
@@ -48378,8 +50137,14 @@ function requireSqf () {
 	  };
 
 	  const KEYWORDS = [
+	    'break',
+	    'breakWith',
+	    'breakOut',
+	    'breakTo',
 	    'case',
 	    'catch',
+	    'continue',
+	    'continueWith',
 	    'default',
 	    'do',
 	    'else',
@@ -48389,8 +50154,10 @@ function requireSqf () {
 	    'forEach',
 	    'from',
 	    'if',
+	    'local',
 	    'private',
 	    'switch',
+	    'step',
 	    'then',
 	    'throw',
 	    'to',
@@ -48406,6 +50173,7 @@ function requireSqf () {
 	    'configNull',
 	    'controlNull',
 	    'displayNull',
+	    'diaryRecordNull',
 	    'east',
 	    'endl',
 	    'false',
@@ -48421,6 +50189,8 @@ function requireSqf () {
 	    'scriptNull',
 	    'sideAmbientLife',
 	    'sideEmpty',
+	    'sideEnemy',
+	    'sideFriendly',
 	    'sideLogic',
 	    'sideUnknown',
 	    'taskNull',
@@ -48436,6 +50206,7 @@ function requireSqf () {
 	    'action',
 	    'actionIDs',
 	    'actionKeys',
+	    'actionKeysEx',
 	    'actionKeysImages',
 	    'actionKeysNames',
 	    'actionKeysNamesArray',
@@ -48444,6 +50215,7 @@ function requireSqf () {
 	    'activateAddons',
 	    'activatedAddons',
 	    'activateKey',
+	    'activeTitleEffectParams',
 	    'add3DENConnection',
 	    'add3DENEventHandler',
 	    'add3DENLayer',
@@ -48503,6 +50275,7 @@ function requireSqf () {
 	    'addToRemainsCollector',
 	    'addTorque',
 	    'addUniform',
+	    'addUserActionEventHandler',
 	    'addVehicle',
 	    'addVest',
 	    'addWaypoint',
@@ -48536,20 +50309,26 @@ function requireSqf () {
 	    'allCutLayers',
 	    'allDead',
 	    'allDeadMen',
+	    'allDiaryRecords',
 	    'allDiarySubjects',
 	    'allDisplays',
+	    'allEnv3DSoundSources',
 	    'allGroups',
+	    'allLODs',
 	    'allMapMarkers',
 	    'allMines',
 	    'allMissionObjects',
+	    'allObjects',
 	    'allow3DMode',
 	    'allowCrewInImmobile',
 	    'allowCuratorLogicIgnoreAreas',
 	    'allowDamage',
 	    'allowDammage',
+	    'allowedService',
 	    'allowFileOperations',
 	    'allowFleeing',
 	    'allowGetIn',
+	    'allowService',
 	    'allowSprint',
 	    'allPlayers',
 	    'allSimpleObjects',
@@ -48557,7 +50336,9 @@ function requireSqf () {
 	    'allTurrets',
 	    'allUnits',
 	    'allUnitsUAV',
+	    'allUsers',
 	    'allVariables',
+	    'ambientTemperature',
 	    'ammo',
 	    'ammoOnPylon',
 	    'and',
@@ -48589,12 +50370,14 @@ function requireSqf () {
 	    'assignedCargo',
 	    'assignedCommander',
 	    'assignedDriver',
+	    'assignedGroup',
 	    'assignedGunner',
 	    'assignedItems',
 	    'assignedTarget',
 	    'assignedTeam',
 	    'assignedVehicle',
 	    'assignedVehicleRole',
+	    'assignedVehicles',
 	    'assignItem',
 	    'assignTeam',
 	    'assignToAirport',
@@ -48608,13 +50391,13 @@ function requireSqf () {
 	    'attachObject',
 	    'attachTo',
 	    'attackEnabled',
+	    'awake',
 	    'backpack',
 	    'backpackCargo',
 	    'backpackContainer',
 	    'backpackItems',
 	    'backpackMagazines',
 	    'backpackSpaceFor',
-	    'batteryChargeRTD',
 	    'behaviour',
 	    'benchmark',
 	    'bezierInterpolation',
@@ -48624,10 +50407,7 @@ function requireSqf () {
 	    'boundingBox',
 	    'boundingBoxReal',
 	    'boundingCenter',
-	    'break',
-	    'breakOut',
-	    'breakTo',
-	    'breakWith',
+	    'brakesDisabled',
 	    'briefingName',
 	    'buildingExit',
 	    'buildingPos',
@@ -48682,6 +50462,7 @@ function requireSqf () {
 	    'canAddItemToUniform',
 	    'canAddItemToVest',
 	    'cancelSimpleTaskDestination',
+	    'canDeployWeapon',
 	    'canFire',
 	    'canMove',
 	    'canSlingLoad',
@@ -48715,7 +50496,6 @@ function requireSqf () {
 	    'clearMagazinePool',
 	    'clearOverlay',
 	    'clearRadio',
-	    'clearVehicleInit',
 	    'clearWeaponCargo',
 	    'clearWeaponCargoGlobal',
 	    'clearWeaponPool',
@@ -48726,6 +50506,7 @@ function requireSqf () {
 	    'collapseObjectTree',
 	    'collect3DENHistory',
 	    'collectiveRTD',
+	    'collisionDisabledWith',
 	    'combatBehaviour',
 	    'combatMode',
 	    'commandArtilleryFire',
@@ -48744,6 +50525,8 @@ function requireSqf () {
 	    'commandWatch',
 	    'comment',
 	    'commitOverlay',
+	    'compatibleItems',
+	    'compatibleMagazines',
 	    'compile',
 	    'compileFinal',
 	    'compileScript',
@@ -48761,9 +50544,8 @@ function requireSqf () {
 	    'confirmSensorTarget',
 	    'connectTerminalToUAV',
 	    'connectToServer',
-	    'continue',
-	    'continueWith',
 	    'controlsGroupCtrl',
+	    'conversationDisabled',
 	    'copyFromClipboard',
 	    'copyToClipboard',
 	    'copyWaypoints',
@@ -48799,7 +50581,6 @@ function requireSqf () {
 	    'createSimpleTask',
 	    'createSite',
 	    'createSoundSource',
-	    'createTarget',
 	    'createTask',
 	    'createTeam',
 	    'createTrigger',
@@ -48824,9 +50605,11 @@ function requireSqf () {
 	    'ctrlAngle',
 	    'ctrlAnimateModel',
 	    'ctrlAnimationPhaseModel',
+	    'ctrlAt',
 	    'ctrlAutoScrollDelay',
 	    'ctrlAutoScrollRewind',
 	    'ctrlAutoScrollSpeed',
+	    'ctrlBackgroundColor',
 	    'ctrlChecked',
 	    'ctrlClassName',
 	    'ctrlCommit',
@@ -48837,6 +50620,7 @@ function requireSqf () {
 	    'ctrlEnabled',
 	    'ctrlFade',
 	    'ctrlFontHeight',
+	    'ctrlForegroundColor',
 	    'ctrlHTMLLoaded',
 	    'ctrlIDC',
 	    'ctrlIDD',
@@ -48846,8 +50630,10 @@ function requireSqf () {
 	    'ctrlMapAnimDone',
 	    'ctrlMapCursor',
 	    'ctrlMapMouseOver',
+	    'ctrlMapPosition',
 	    'ctrlMapScale',
 	    'ctrlMapScreenToWorld',
+	    'ctrlMapSetPosition',
 	    'ctrlMapWorldToScreen',
 	    'ctrlModel',
 	    'ctrlModelDirAndUp',
@@ -48908,6 +50694,7 @@ function requireSqf () {
 	    'ctrlSetPositionY',
 	    'ctrlSetScale',
 	    'ctrlSetScrollValues',
+	    'ctrlSetShadow',
 	    'ctrlSetStructuredText',
 	    'ctrlSetText',
 	    'ctrlSetTextColor',
@@ -48918,7 +50705,10 @@ function requireSqf () {
 	    'ctrlSetTooltipColorBox',
 	    'ctrlSetTooltipColorShade',
 	    'ctrlSetTooltipColorText',
+	    'ctrlSetTooltipMaxWidth',
 	    'ctrlSetURL',
+	    'ctrlSetURLOverlayMode',
+	    'ctrlShadow',
 	    'ctrlShow',
 	    'ctrlShown',
 	    'ctrlStyle',
@@ -48931,6 +50721,7 @@ function requireSqf () {
 	    'ctrlTooltip',
 	    'ctrlType',
 	    'ctrlURL',
+	    'ctrlURLOverlayMode',
 	    'ctrlVisible',
 	    'ctRowControls',
 	    'ctRowCount',
@@ -48984,7 +50775,7 @@ function requireSqf () {
 	    'damage',
 	    'date',
 	    'dateToNumber',
-	    'daytime',
+	    'dayTime',
 	    'deActivateKey',
 	    'debriefingText',
 	    'debugFSM',
@@ -49006,7 +50797,6 @@ function requireSqf () {
 	    'deleteResources',
 	    'deleteSite',
 	    'deleteStatus',
-	    'deleteTarget',
 	    'deleteTeam',
 	    'deleteVehicle',
 	    'deleteVehicleCrew',
@@ -49015,39 +50805,42 @@ function requireSqf () {
 	    'detectedMines',
 	    'diag_activeMissionFSMs',
 	    'diag_activeScripts',
-	    'diag_activeSQSScripts',
-	    'diag_captureFrameToFile',
-	    'diag_captureSlowFrame',
-	    'diag_deltaTime',
-	    'diag_drawMode',
-	    'diag_enable',
-	    'diag_enabled',
-	    'diag_fps',
-	    'diag_fpsMin',
-	    'diag_frameNo',
-	    'diag_list',
-	    'diag_mergeConfigFile',
-	    'diag_scope',
 	    'diag_activeSQFScripts',
+	    'diag_activeSQSScripts',
 	    'diag_allMissionEventHandlers',
 	    'diag_captureFrame',
+	    'diag_captureFrameToFile',
+	    'diag_captureSlowFrame',
 	    'diag_codePerformance',
+	    'diag_deltaTime',
+	    'diag_drawmode',
 	    'diag_dumpCalltraceToLog',
+	    'diag_dumpScriptAssembly',
 	    'diag_dumpTerrainSynth',
 	    'diag_dynamicSimulationEnd',
+	    'diag_enable',
+	    'diag_enabled',
 	    'diag_exportConfig',
 	    'diag_exportTerrainSVG',
+	    'diag_fps',
+	    'diag_fpsmin',
+	    'diag_frameno',
+	    'diag_getTerrainSegmentOffset',
 	    'diag_lightNewLoad',
+	    'diag_list',
 	    'diag_localized',
 	    'diag_log',
 	    'diag_logSlowFrame',
+	    'diag_mergeConfigFile',
 	    'diag_recordTurretLimits',
-	    'diag_resetShapes',
+	    'diag_resetFSM',
+	    'diag_resetshapes',
+	    'diag_scope',
 	    'diag_setLightNew',
+	    'diag_stacktrace',
 	    'diag_tickTime',
 	    'diag_toggle',
 	    'dialog',
-	    'diaryRecordNull',
 	    'diarySubjectExists',
 	    'didJIP',
 	    'didJIPOwner',
@@ -49056,8 +50849,10 @@ function requireSqf () {
 	    'difficultyEnabledRTD',
 	    'difficultyOption',
 	    'direction',
+	    'directionStabilizationEnabled',
 	    'directSay',
 	    'disableAI',
+	    'disableBrakes',
 	    'disableCollisionWith',
 	    'disableConversation',
 	    'disableDebriefingStats',
@@ -49069,11 +50864,14 @@ function requireSqf () {
 	    'disableUAVConnectability',
 	    'disableUserInput',
 	    'displayAddEventHandler',
+	    'displayChild',
 	    'displayCtrl',
 	    'displayParent',
 	    'displayRemoveAllEventHandlers',
 	    'displayRemoveEventHandler',
 	    'displaySetEventHandler',
+	    'displayUniqueName',
+	    'displayUpdate',
 	    'dissolveTeam',
 	    'distance',
 	    'distance2D',
@@ -49095,6 +50893,7 @@ function requireSqf () {
 	    'drawEllipse',
 	    'drawIcon',
 	    'drawIcon3D',
+	    'drawLaser',
 	    'drawLine',
 	    'drawLine3D',
 	    'drawLink',
@@ -49129,6 +50928,7 @@ function requireSqf () {
 	    'enableCopilot',
 	    'enableDebriefingStats',
 	    'enableDiagLegend',
+	    'enableDirectionStabilization',
 	    'enableDynamicSimulation',
 	    'enableDynamicSimulationSystem',
 	    'enableEndDialog',
@@ -49159,7 +50959,6 @@ function requireSqf () {
 	    'enableWeaponDisassembly',
 	    'endLoadingScreen',
 	    'endMission',
-	    'enemy',
 	    'engineOn',
 	    'enginesIsOnRTD',
 	    'enginesPowerRTD',
@@ -49168,6 +50967,7 @@ function requireSqf () {
 	    'entities',
 	    'environmentEnabled',
 	    'environmentVolume',
+	    'equipmentDisabled',
 	    'estimatedEndServerTime',
 	    'estimatedTimeLeft',
 	    'evalObjectArgument',
@@ -49180,7 +50980,6 @@ function requireSqf () {
 	    'exp',
 	    'expectedDestination',
 	    'exportJIPMessages',
-	    'exportLandscapeXYZ',
 	    'eyeDirection',
 	    'eyePos',
 	    'face',
@@ -49194,6 +50993,7 @@ function requireSqf () {
 	    'fileExists',
 	    'fillWeaponsFromPool',
 	    'find',
+	    'findAny',
 	    'findCover',
 	    'findDisplay',
 	    'findEditorObject',
@@ -49248,14 +51048,15 @@ function requireSqf () {
 	    'formationTask',
 	    'formatText',
 	    'formLeader',
+	    'freeExtension',
 	    'freeLook',
-	    'friendly',
 	    'fromEditor',
 	    'fuel',
 	    'fullCrew',
 	    'gearIDCAmmoCount',
 	    'gearSlotAmmoCount',
 	    'gearSlotData',
+	    'gestureState',
 	    'get',
 	    'get3DENActionState',
 	    'get3DENAttribute',
@@ -49271,6 +51072,7 @@ function requireSqf () {
 	    'get3DENMouseOver',
 	    'get3DENSelected',
 	    'getAimingCoef',
+	    'getAllEnv3DSoundControllers',
 	    'getAllEnvSoundControllers',
 	    'getAllHitPointsDamage',
 	    'getAllOwnedMines',
@@ -49300,12 +51102,16 @@ function requireSqf () {
 	    'getClientStateNumber',
 	    'getCompatiblePylonMagazines',
 	    'getConnectedUAV',
+	    'getConnectedUAVUnit',
 	    'getContainerMaxLoad',
+	    'getCorpse',
+	    'getCruiseControl',
 	    'getCursorObjectParams',
 	    'getCustomAimCoef',
 	    'getCustomSoundController',
 	    'getCustomSoundControllerCount',
 	    'getDammage',
+	    'getDebriefingText',
 	    'getDescription',
 	    'getDir',
 	    'getDirVisual',
@@ -49318,10 +51124,14 @@ function requireSqf () {
 	    'getEditorMode',
 	    'getEditorObjectScope',
 	    'getElevationOffset',
+	    'getEngineTargetRPMRTD',
+	    'getEnv3DSoundController',
 	    'getEnvSoundController',
+	    'getEventHandlerInfo',
 	    'getFatigue',
 	    'getFieldManualStartPage',
 	    'getForcedFlagTexture',
+	    'getForcedSpeed',
 	    'getFriend',
 	    'getFSMVariable',
 	    'getFuelCargo',
@@ -49357,25 +51167,28 @@ function requireSqf () {
 	    'getObjectChildren',
 	    'getObjectDLC',
 	    'getObjectFOV',
+	    'getObjectID',
 	    'getObjectMaterials',
 	    'getObjectProxy',
 	    'getObjectScale',
 	    'getObjectTextures',
 	    'getObjectType',
 	    'getObjectViewDistance',
+	    'getOpticsMode',
 	    'getOrDefault',
+	    'getOrDefaultCall',
 	    'getOxygenRemaining',
 	    'getPersonUsedDLCs',
 	    'getPilotCameraDirection',
 	    'getPilotCameraPosition',
 	    'getPilotCameraRotation',
 	    'getPilotCameraTarget',
+	    'getPiPViewDistance',
 	    'getPlateNumber',
 	    'getPlayerChannel',
 	    'getPlayerID',
 	    'getPlayerScores',
 	    'getPlayerUID',
-	    'getPlayerUIDOld',
 	    'getPlayerVoNVolume',
 	    'getPos',
 	    'getPosASL',
@@ -49394,6 +51207,8 @@ function requireSqf () {
 	    'getResolution',
 	    'getRoadInfo',
 	    'getRotorBrakeRTD',
+	    'getSensorTargets',
+	    'getSensorThreats',
 	    'getShadowDistance',
 	    'getShotParents',
 	    'getSlingLoad',
@@ -49406,24 +51221,32 @@ function requireSqf () {
 	    'getSubtitleOptions',
 	    'getSuppression',
 	    'getTerrainGrid',
+	    'getTerrainHeight',
 	    'getTerrainHeightASL',
+	    'getTerrainInfo',
 	    'getText',
 	    'getTextRaw',
+	    'getTextureInfo',
 	    'getTextWidth',
+	    'getTiParameters',
 	    'getTotalDLCUsageTime',
 	    'getTrimOffsetRTD',
+	    'getTurretLimits',
+	    'getTurretOpticsMode',
+	    'getUnitFreefallInfo',
 	    'getUnitLoadout',
 	    'getUnitTrait',
+	    'getUnloadInCombat',
+	    'getUserInfo',
 	    'getUserMFDText',
 	    'getUserMFDValue',
 	    'getVariable',
 	    'getVehicleCargo',
-	    'getVehicleTIPars',
+	    'getVehicleTiPars',
 	    'getWeaponCargo',
 	    'getWeaponSway',
 	    'getWingsOrientationRTD',
 	    'getWingsPositionRTD',
-	    'getWorld',
 	    'getWPPos',
 	    'glanceAt',
 	    'globalChat',
@@ -49435,9 +51258,10 @@ function requireSqf () {
 	    'groupFromNetId',
 	    'groupIconSelectable',
 	    'groupIconsVisible',
-	    'groupId',
+	    'groupID',
 	    'groupOwner',
 	    'groupRadio',
+	    'groups',
 	    'groupSelectedUnits',
 	    'groupSelectUnit',
 	    'gunner',
@@ -49447,6 +51271,7 @@ function requireSqf () {
 	    'handgunMagazine',
 	    'handgunWeapon',
 	    'handsHit',
+	    'hashValue',
 	    'hasInterface',
 	    'hasPilotCamera',
 	    'hasWeapon',
@@ -49461,12 +51286,10 @@ function requireSqf () {
 	    'hcShowBar',
 	    'hcShownBar',
 	    'headgear',
-	    'hideBehindScripted',
 	    'hideBody',
 	    'hideObject',
 	    'hideObjectGlobal',
 	    'hideSelection',
-	    'hierarchyObjectsCount',
 	    'hint',
 	    'hintC',
 	    'hintCadet',
@@ -49494,6 +51317,8 @@ function requireSqf () {
 	    'initAmbientLife',
 	    'inPolygon',
 	    'inputAction',
+	    'inputController',
+	    'inputMouse',
 	    'inRangeOfArtillery',
 	    'insert',
 	    'insertEditorObject',
@@ -49505,12 +51330,14 @@ function requireSqf () {
 	    'isActionMenuVisible',
 	    'isAgent',
 	    'isAimPrecisionEnabled',
+	    'isAllowedCrewInImmobile',
 	    'isArray',
 	    'isAutoHoverOn',
 	    'isAutonomous',
 	    'isAutoStartUpEnabledRTD',
 	    'isAutotest',
 	    'isAutoTrimOnRTD',
+	    'isAwake',
 	    'isBleeding',
 	    'isBurning',
 	    'isClass',
@@ -49520,6 +51347,7 @@ function requireSqf () {
 	    'isDedicated',
 	    'isDLCAvailable',
 	    'isEngineOn',
+	    'isEqualRef',
 	    'isEqualTo',
 	    'isEqualType',
 	    'isEqualTypeAll',
@@ -49536,7 +51364,6 @@ function requireSqf () {
 	    'isGamePaused',
 	    'isGroupDeletedWhenEmpty',
 	    'isHidden',
-	    'isHideBehindScripted',
 	    'isInRemainsCollector',
 	    'isInstructorFigureEnabled',
 	    'isIRLaserOn',
@@ -49547,9 +51374,11 @@ function requireSqf () {
 	    'isLocalized',
 	    'isManualFire',
 	    'isMarkedForCollection',
+	    'isMissionProfileNamespaceLoaded',
 	    'isMultiplayer',
 	    'isMultiplayerSolo',
 	    'isNil',
+	    'isNotEqualRef',
 	    'isNotEqualTo',
 	    'isNull',
 	    'isNumber',
@@ -49561,6 +51390,7 @@ function requireSqf () {
 	    'isRealTime',
 	    'isRemoteExecuted',
 	    'isRemoteExecutedJIP',
+	    'isSaving',
 	    'isSensorTargetConfirmed',
 	    'isServer',
 	    'isShowing3DIcons',
@@ -49568,6 +51398,7 @@ function requireSqf () {
 	    'isSprintAllowed',
 	    'isStaminaEnabled',
 	    'isSteamMission',
+	    'isSteamOverlayEnabled',
 	    'isStreamFriendlyUIEnabled',
 	    'isStressDamageEnabled',
 	    'isText',
@@ -49641,9 +51472,11 @@ function requireSqf () {
 	    'lbSetValue',
 	    'lbSize',
 	    'lbSort',
+	    'lbSortBy',
 	    'lbSortByValue',
 	    'lbText',
 	    'lbTextRight',
+	    'lbTooltip',
 	    'lbValue',
 	    'leader',
 	    'leaderboardDeInit',
@@ -49705,6 +51538,7 @@ function requireSqf () {
 	    'lnbSetValue',
 	    'lnbSize',
 	    'lnbSort',
+	    'lnbSortBy',
 	    'lnbSortByValue',
 	    'lnbText',
 	    'lnbTextRight',
@@ -49712,6 +51546,7 @@ function requireSqf () {
 	    'load',
 	    'loadAbs',
 	    'loadBackpack',
+	    'loadConfig',
 	    'loadFile',
 	    'loadGame',
 	    'loadIdentity',
@@ -49720,7 +51555,6 @@ function requireSqf () {
 	    'loadStatus',
 	    'loadUniform',
 	    'loadVest',
-	    'local',
 	    'localize',
 	    'localNamespace',
 	    'locationPosition',
@@ -49729,6 +51563,7 @@ function requireSqf () {
 	    'lockCargo',
 	    'lockDriver',
 	    'locked',
+	    'lockedCameraTo',
 	    'lockedCargo',
 	    'lockedDriver',
 	    'lockedInventory',
@@ -49736,7 +51571,7 @@ function requireSqf () {
 	    'lockIdentity',
 	    'lockInventory',
 	    'lockTurret',
-	    'lockWP',
+	    'lockWp',
 	    'log',
 	    'logEntities',
 	    'logNetwork',
@@ -49777,6 +51612,7 @@ function requireSqf () {
 	    'matrixMultiply',
 	    'matrixTranspose',
 	    'max',
+	    'maxLoad',
 	    'members',
 	    'menuAction',
 	    'menuAdd',
@@ -49813,9 +51649,11 @@ function requireSqf () {
 	    'missileTargetPos',
 	    'missionConfigFile',
 	    'missionDifficulty',
+	    'missionEnd',
 	    'missionName',
 	    'missionNameSource',
 	    'missionNamespace',
+	    'missionProfileNamespace',
 	    'missionStart',
 	    'missionVersion',
 	    'mod',
@@ -49837,7 +51675,6 @@ function requireSqf () {
 	    'moveInTurret',
 	    'moveObjectToEnd',
 	    'moveOut',
-	    'moveTarget',
 	    'moveTime',
 	    'moveTo',
 	    'moveToCompleted',
@@ -49851,6 +51688,7 @@ function requireSqf () {
 	    'nearestLocation',
 	    'nearestLocations',
 	    'nearestLocationWithDubbing',
+	    'nearestMines',
 	    'nearestObject',
 	    'nearestObjects',
 	    'nearestTerrainObjects',
@@ -49860,6 +51698,7 @@ function requireSqf () {
 	    'nearSupplies',
 	    'nearTargets',
 	    'needReload',
+	    'needService',
 	    'netId',
 	    'netObjNull',
 	    'newOverlay',
@@ -49869,12 +51708,10 @@ function requireSqf () {
 	    'not',
 	    'numberOfEnginesRTD',
 	    'numberToDate',
-	    'object',
 	    'objectCurators',
 	    'objectFromNetId',
 	    'objectParent',
 	    'objStatus',
-	    'onBriefingGear',
 	    'onBriefingGroup',
 	    'onBriefingNotes',
 	    'onBriefingPlan',
@@ -49895,7 +51732,6 @@ function requireSqf () {
 	    'onTeamSwitch',
 	    'openCuratorInterface',
 	    'openDLCPage',
-	    'openDSInterface',
 	    'openGPS',
 	    'openMap',
 	    'openSteamApp',
@@ -49936,6 +51772,8 @@ function requireSqf () {
 	    'playScriptedMission',
 	    'playSound',
 	    'playSound3D',
+	    'playSoundUI',
+	    'pose',
 	    'position',
 	    'positionCameraToWorld',
 	    'posScreenToWorld',
@@ -49961,7 +51799,6 @@ function requireSqf () {
 	    'primaryWeaponMagazine',
 	    'priority',
 	    'processDiaryLink',
-	    'processInitCommands',
 	    'productVersion',
 	    'profileName',
 	    'profileNamespace',
@@ -49985,14 +51822,19 @@ function requireSqf () {
 	    'radioChannelRemove',
 	    'radioChannelSetCallSign',
 	    'radioChannelSetLabel',
+	    'radioEnabled',
 	    'radioVolume',
 	    'rain',
 	    'rainbow',
+	    'rainParams',
 	    'random',
 	    'rank',
 	    'rankId',
 	    'rating',
 	    'rectangular',
+	    'regexFind',
+	    'regexMatch',
+	    'regexReplace',
 	    'registeredTasks',
 	    'registerTask',
 	    'reload',
@@ -50023,11 +51865,11 @@ function requireSqf () {
 	    'removeAllOwnedMines',
 	    'removeAllPrimaryWeaponItems',
 	    'removeAllSecondaryWeaponItems',
+	    'removeAllUserActionEventHandlers',
 	    'removeAllWeapons',
 	    'removeBackpack',
 	    'removeBackpackGlobal',
 	    'removeBinocularItem',
-	    'removeClothing',
 	    'removeCuratorAddons',
 	    'removeCuratorCameraArea',
 	    'removeCuratorEditableObjects',
@@ -50063,6 +51905,7 @@ function requireSqf () {
 	    'removeSwitchableUnit',
 	    'removeTeamMember',
 	    'removeUniform',
+	    'removeUserActionEventHandler',
 	    'removeVest',
 	    'removeWeapon',
 	    'removeWeaponAttachmentCargo',
@@ -50095,8 +51938,8 @@ function requireSqf () {
 	    'ropeEndPosition',
 	    'ropeLength',
 	    'ropes',
+	    'ropesAttachedTo',
 	    'ropeSegments',
-	    'ropeSetCargoMass',
 	    'ropeUnwind',
 	    'ropeUnwound',
 	    'rotorsForcesRTD',
@@ -50113,6 +51956,7 @@ function requireSqf () {
 	    'saveGame',
 	    'saveIdentity',
 	    'saveJoysticks',
+	    'saveMissionProfileNamespace',
 	    'saveOverlay',
 	    'saveProfileNamespace',
 	    'saveStatus',
@@ -50139,6 +51983,7 @@ function requireSqf () {
 	    'selectEditorObject',
 	    'selectionNames',
 	    'selectionPosition',
+	    'selectionVectorDirAndUp',
 	    'selectLeader',
 	    'selectMax',
 	    'selectMin',
@@ -50153,10 +51998,12 @@ function requireSqf () {
 	    'sendTask',
 	    'sendTaskResult',
 	    'sendUDPMessage',
+	    'sentencesEnabled',
 	    'serverCommand',
 	    'serverCommandAvailable',
 	    'serverCommandExecutable',
 	    'serverName',
+	    'serverNamespace',
 	    'serverTime',
 	    'set',
 	    'set3DENAttribute',
@@ -50181,21 +52028,17 @@ function requireSqf () {
 	    'setAnimSpeedCoef',
 	    'setAperture',
 	    'setApertureNew',
-	    'setAPURTD',
 	    'setArmoryPoints',
 	    'setAttributes',
 	    'setAutonomous',
-	    'setBatteryChargeRTD',
-	    'setBatteryRTD',
 	    'setBehaviour',
 	    'setBehaviourStrong',
 	    'setBleedingRemaining',
 	    'setBrakesRTD',
-	    'setCameraEffect',
 	    'setCameraInterest',
 	    'setCamShakeDefParams',
 	    'setCamShakeParams',
-	    'setCamUseTI',
+	    'setCamUseTi',
 	    'setCaptive',
 	    'setCenterOfMass',
 	    'setCollisionLight',
@@ -50203,6 +52046,7 @@ function requireSqf () {
 	    'setCombatMode',
 	    'setCompassOscillation',
 	    'setConvoySeparation',
+	    'setCruiseControl',
 	    'setCuratorCameraAreaCeiling',
 	    'setCuratorCoef',
 	    'setCuratorEditingAreaType',
@@ -50211,7 +52055,7 @@ function requireSqf () {
 	    'setCurrentTask',
 	    'setCurrentWaypoint',
 	    'setCustomAimCoef',
-	    'setCustomMissionData',
+	    'SetCustomMissionData',
 	    'setCustomSoundController',
 	    'setCustomWeightRTD',
 	    'setDamage',
@@ -50234,10 +52078,9 @@ function requireSqf () {
 	    'setEditorObjectScope',
 	    'setEffectCondition',
 	    'setEffectiveCommander',
-	    'setEngineRPMRTD',
 	    'setEngineRpmRTD',
 	    'setFace',
-	    'setFaceAnimation',
+	    'setFaceanimation',
 	    'setFatigue',
 	    'setFeatureType',
 	    'setFlagAnimationPhase',
@@ -50258,7 +52101,7 @@ function requireSqf () {
 	    'setGroupIconParams',
 	    'setGroupIconsSelectable',
 	    'setGroupIconsVisible',
-	    'setGroupId',
+	    'setGroupid',
 	    'setGroupIdGlobal',
 	    'setGroupOwner',
 	    'setGusts',
@@ -50268,6 +52111,7 @@ function requireSqf () {
 	    'setHitPointDamage',
 	    'setHorizonParallaxCoef',
 	    'setHUDMovementLevels',
+	    'setHumidity',
 	    'setIdentity',
 	    'setImportance',
 	    'setInfoPanel',
@@ -50276,12 +52120,15 @@ function requireSqf () {
 	    'setLightAttenuation',
 	    'setLightBrightness',
 	    'setLightColor',
+	    'setLightConePars',
 	    'setLightDayLight',
 	    'setLightFlareMaxDistance',
 	    'setLightFlareSize',
 	    'setLightIntensity',
+	    'setLightIR',
 	    'setLightnings',
 	    'setLightUseFlare',
+	    'setLightVolumeShape',
 	    'setLocalWindParams',
 	    'setMagazineTurretAmmo',
 	    'setMarkerAlpha',
@@ -50307,6 +52154,7 @@ function requireSqf () {
 	    'setMarkerType',
 	    'setMarkerTypeLocal',
 	    'setMass',
+	    'setMaxLoad',
 	    'setMimic',
 	    'setMissileTarget',
 	    'setMissileTargetPos',
@@ -50323,6 +52171,7 @@ function requireSqf () {
 	    'setObjectTexture',
 	    'setObjectTextureGlobal',
 	    'setObjectViewDistance',
+	    'setOpticsMode',
 	    'setOvercast',
 	    'setOwner',
 	    'setOxygenRemaining',
@@ -50336,6 +52185,7 @@ function requireSqf () {
 	    'setPilotCameraTarget',
 	    'setPilotLight',
 	    'setPiPEffect',
+	    'setPiPViewDistance',
 	    'setPitch',
 	    'setPlateNumber',
 	    'setPlayable',
@@ -50377,7 +52227,6 @@ function requireSqf () {
 	    'setSpeedMode',
 	    'setStamina',
 	    'setStaminaScheme',
-	    'setStarterRTD',
 	    'setStatValue',
 	    'setSuppression',
 	    'setSystemOfUnits',
@@ -50386,12 +52235,12 @@ function requireSqf () {
 	    'setTaskResult',
 	    'setTaskState',
 	    'setTerrainGrid',
+	    'setTerrainHeight',
 	    'setText',
-	    'setThrottleRTD',
 	    'setTimeMultiplier',
+	    'setTiParameter',
 	    'setTitleEffect',
-	    'setToneMapping',
-	    'setToneMappingParams',
+	    'setTowParent',
 	    'setTrafficDensity',
 	    'setTrafficDistance',
 	    'setTrafficGap',
@@ -50403,10 +52252,13 @@ function requireSqf () {
 	    'setTriggerText',
 	    'setTriggerTimeout',
 	    'setTriggerType',
+	    'setTurretLimits',
+	    'setTurretOpticsMode',
 	    'setType',
 	    'setUnconscious',
 	    'setUnitAbility',
 	    'setUnitCombatMode',
+	    'setUnitFreefallHeight',
 	    'setUnitLoadout',
 	    'setUnitPos',
 	    'setUnitPosWeak',
@@ -50426,14 +52278,13 @@ function requireSqf () {
 	    'setVehicleArmor',
 	    'setVehicleCargo',
 	    'setVehicleId',
-	    'setVehicleInit',
 	    'setVehicleLock',
 	    'setVehiclePosition',
 	    'setVehicleRadar',
 	    'setVehicleReceiveRemoteTargets',
 	    'setVehicleReportOwnPosition',
 	    'setVehicleReportRemoteTargets',
-	    'setVehicleTIPars',
+	    'setVehicleTiPars',
 	    'setVehicleVarName',
 	    'setVelocity',
 	    'setVelocityModelSpace',
@@ -50474,7 +52325,7 @@ function requireSqf () {
 	    'showCommandingMenu',
 	    'showCompass',
 	    'showCuratorCompass',
-	    'showGPS',
+	    'showGps',
 	    'showHUD',
 	    'showLegend',
 	    'showMap',
@@ -50483,12 +52334,13 @@ function requireSqf () {
 	    'shownCompass',
 	    'shownCuratorCompass',
 	    'showNewEditorObject',
-	    'shownGPS',
+	    'shownGps',
 	    'shownHUD',
 	    'shownMap',
 	    'shownPad',
 	    'shownRadio',
 	    'shownScoretable',
+	    'shownSubtitles',
 	    'shownUAVFeed',
 	    'shownWarrant',
 	    'shownWatch',
@@ -50503,16 +52355,12 @@ function requireSqf () {
 	    'showWaypoints',
 	    'side',
 	    'sideChat',
-	    'sideEmpty',
-	    'sideEnemy',
-	    'sideFriendly',
 	    'sideRadio',
 	    'simpleTasks',
 	    'simulationEnabled',
 	    'simulCloudDensity',
 	    'simulCloudOcclusion',
 	    'simulInClouds',
-	    'simulSetHumidity',
 	    'simulWeatherSync',
 	    'sin',
 	    'size',
@@ -50542,7 +52390,6 @@ function requireSqf () {
 	    'squadParams',
 	    'stance',
 	    'startLoadingScreen',
-	    'step',
 	    'stop',
 	    'stopEngineRTD',
 	    'stopped',
@@ -50604,7 +52451,6 @@ function requireSqf () {
 	    'textLog',
 	    'textLogFormat',
 	    'tg',
-	    'throttleRTD',
 	    'time',
 	    'timeMultiplier',
 	    'titleCut',
@@ -50689,6 +52535,7 @@ function requireSqf () {
 	    'uniformContainer',
 	    'uniformItems',
 	    'uniformMagazines',
+	    'uniqueUnitItems',
 	    'unitAddons',
 	    'unitAimPosition',
 	    'unitAimPositionVisual',
@@ -50711,6 +52558,7 @@ function requireSqf () {
 	    'useAISteeringComponent',
 	    'useAudioTimeForMoves',
 	    'userInputDisabled',
+	    'values',
 	    'vectorAdd',
 	    'vectorCos',
 	    'vectorCrossProduct',
@@ -50751,7 +52599,7 @@ function requireSqf () {
 	    'vestMagazines',
 	    'viewDistance',
 	    'visibleCompass',
-	    'visibleGPS',
+	    'visibleGps',
 	    'visibleMap',
 	    'visiblePosition',
 	    'visiblePositionASL',
@@ -50790,7 +52638,9 @@ function requireSqf () {
 	    'weaponDirection',
 	    'weaponInertia',
 	    'weaponLowered',
+	    'weaponReloadingTime',
 	    'weapons',
+	    'weaponsInfo',
 	    'weaponsItems',
 	    'weaponsItemsCargo',
 	    'weaponState',
@@ -50806,17 +52656,16 @@ function requireSqf () {
 	    'worldSize',
 	    'worldToModel',
 	    'worldToModelVisual',
-	    'worldToScreen',
+	    'worldToScreen'
 	  ];
-
+	  
 	  // list of keywords from:
 	  // https://community.bistudio.com/wiki/PreProcessor_Commands
 	  const PREPROCESSOR = {
 	    className: 'meta',
 	    begin: /#\s*[a-z]+\b/,
 	    end: /$/,
-	    keywords: { keyword:
-	        'define undef ifdef ifndef else endif include' },
+	    keywords: 'define undef ifdef ifndef else endif include if',
 	    contains: [
 	      {
 	        begin: /\\\n/,
@@ -50824,7 +52673,6 @@ function requireSqf () {
 	      },
 	      hljs.inherit(STRINGS, { className: 'string' }),
 	      {
-	        className: 'string',
 	        begin: /<[^\n>]*>/,
 	        end: /$/,
 	        illegal: '\\n'
@@ -50833,7 +52681,7 @@ function requireSqf () {
 	      hljs.C_BLOCK_COMMENT_MODE
 	    ]
 	  };
-
+	  
 	  return {
 	    name: 'SQF',
 	    case_insensitive: true,
@@ -50851,7 +52699,19 @@ function requireSqf () {
 	      STRINGS,
 	      PREPROCESSOR
 	    ],
-	    illegal: /#|^\$ /
+	    illegal: [
+	      //$ is only valid when used with Hex numbers (e.g. $FF)
+	      /\$[^a-fA-F0-9]/, 
+	      /\w\$/,
+	      /\?/,      //There's no ? in SQF
+	      /@/,       //There's no @ in SQF
+	      // Brute-force-fixing the build error. See https://github.com/highlightjs/highlight.js/pull/3193#issuecomment-843088729
+	      / \| /,
+	      // . is only used in numbers
+	      /[a-zA-Z_]\./,
+	      /\:\=/,
+	      /\[\:/
+	    ]
 	  };
 	}
 
@@ -51474,7 +53334,7 @@ function requireSql () {
 
 	  const VARIABLE = {
 	    className: "variable",
-	    begin: /@[a-z0-9]+/,
+	    begin: /@[a-z0-9][a-z0-9_]*/,
 	  };
 
 	  const OPERATOR = {
@@ -51590,16 +53450,20 @@ function requireStan () {
 
 	  const TYPES = [
 	    'array',
+	    'tuple',
 	    'complex',
 	    'int',
 	    'real',
 	    'vector',
+	    'complex_vector',
 	    'ordered',
 	    'positive_ordered',
 	    'simplex',
 	    'unit_vector',
 	    'row_vector',
+	    'complex_row_vector',
 	    'matrix',
+	    'complex_matrix',
 	    'cholesky_factor_corr|10',
 	    'cholesky_factor_cov|10',
 	    'corr_matrix|10',
@@ -51616,8 +53480,6 @@ function requireStan () {
 	  // functions_quoted.txt
 
 	  const FUNCTIONS = [
-	    'Phi',
-	    'Phi_approx',
 	    'abs',
 	    'acos',
 	    'acosh',
@@ -51635,7 +53497,6 @@ function requireStan () {
 	    'bessel_first_kind',
 	    'bessel_second_kind',
 	    'binary_log_loss',
-	    'binomial_coefficient_log',
 	    'block',
 	    'cbrt',
 	    'ceil',
@@ -51646,37 +53507,48 @@ function requireStan () {
 	    'cols',
 	    'columns_dot_product',
 	    'columns_dot_self',
+	    'complex_schur_decompose',
+	    'complex_schur_decompose_t',
+	    'complex_schur_decompose_u',
 	    'conj',
 	    'cos',
 	    'cosh',
 	    'cov_exp_quad',
 	    'crossprod',
+	    'csr_extract',
 	    'csr_extract_u',
 	    'csr_extract_v',
 	    'csr_extract_w',
 	    'csr_matrix_times_vector',
 	    'csr_to_dense_matrix',
 	    'cumulative_sum',
+	    'dae',
+	    'dae_tol',
 	    'determinant',
 	    'diag_matrix',
+	    'diagonal',
 	    'diag_post_multiply',
 	    'diag_pre_multiply',
-	    'diagonal',
 	    'digamma',
 	    'dims',
 	    'distance',
 	    'dot_product',
 	    'dot_self',
+	    'eigendecompose',
+	    'eigendecompose_sym',
+	    'eigenvalues',
 	    'eigenvalues_sym',
+	    'eigenvectors',
 	    'eigenvectors_sym',
 	    'erf',
 	    'erfc',
 	    'exp',
 	    'exp2',
 	    'expm1',
-	    'fabs',
 	    'falling_factorial',
 	    'fdim',
+	    'fft',
+	    'fft2',
 	    'floor',
 	    'fma',
 	    'fmax',
@@ -51686,7 +53558,6 @@ function requireStan () {
 	    'gamma_q',
 	    'generalized_inverse',
 	    'get_imag',
-	    'get_lp',
 	    'get_real',
 	    'head',
 	    'hmm_hidden_state_prob',
@@ -51694,20 +53565,24 @@ function requireStan () {
 	    'hypot',
 	    'identity_matrix',
 	    'inc_beta',
-	    'int_step',
 	    'integrate_1d',
 	    'integrate_ode',
 	    'integrate_ode_adams',
 	    'integrate_ode_bdf',
 	    'integrate_ode_rk45',
+	    'int_step',
 	    'inv',
-	    'inv_Phi',
 	    'inv_cloglog',
-	    'inv_logit',
-	    'inv_sqrt',
-	    'inv_square',
+	    'inv_erfc',
 	    'inverse',
 	    'inverse_spd',
+	    'inv_fft',
+	    'inv_fft2',
+	    'inv_inc_beta',
+	    'inv_logit',
+	    'inv_Phi',
+	    'inv_sqrt',
+	    'inv_square',
 	    'is_inf',
 	    'is_nan',
 	    'lambert_w0',
@@ -51733,12 +53608,12 @@ function requireStan () {
 	    'log_falling_factorial',
 	    'log_inv_logit',
 	    'log_inv_logit_diff',
+	    'logit',
 	    'log_mix',
 	    'log_modified_bessel_first_kind',
 	    'log_rising_factorial',
 	    'log_softmax',
 	    'log_sum_exp',
-	    'logit',
 	    'machine_precision',
 	    'map_rect',
 	    'matrix_exp',
@@ -51753,10 +53628,11 @@ function requireStan () {
 	    'min',
 	    'modified_bessel_first_kind',
 	    'modified_bessel_second_kind',
-	    'multiply_log',
 	    'multiply_lower_tri_self_transpose',
 	    'negative_infinity',
 	    'norm',
+	    'norm1',
+	    'norm2',
 	    'not_a_number',
 	    'num_elements',
 	    'ode_adams',
@@ -51777,14 +53653,18 @@ function requireStan () {
 	    'ones_row_vector',
 	    'ones_vector',
 	    'owens_t',
+	    'Phi',
+	    'Phi_approx',
 	    'polar',
 	    'positive_infinity',
 	    'pow',
 	    'print',
 	    'prod',
 	    'proj',
+	    'qr',
 	    'qr_Q',
 	    'qr_R',
+	    'qr_thin',
 	    'qr_thin_Q',
 	    'qr_thin_R',
 	    'quad_form',
@@ -51824,6 +53704,7 @@ function requireStan () {
 	    'sub_col',
 	    'sub_row',
 	    'sum',
+	    'svd',
 	    'svd_U',
 	    'svd_V',
 	    'symmetrize_from_lower_tri',
@@ -51836,6 +53717,7 @@ function requireStan () {
 	    'to_array_1d',
 	    'to_array_2d',
 	    'to_complex',
+	    'to_int',
 	    'to_matrix',
 	    'to_row_vector',
 	    'to_vector',
@@ -51879,18 +53761,22 @@ function requireStan () {
 	    'inv_chi_square',
 	    'inv_gamma',
 	    'inv_wishart',
+	    'inv_wishart_cholesky',
 	    'lkj_corr',
 	    'lkj_corr_cholesky',
 	    'logistic',
+	    'loglogistic',
 	    'lognormal',
 	    'multi_gp',
 	    'multi_gp_cholesky',
+	    'multinomial',
+	    'multinomial_logit',
 	    'multi_normal',
 	    'multi_normal_cholesky',
 	    'multi_normal_prec',
+	    'multi_student_cholesky_t',
 	    'multi_student_t',
-	    'multinomial',
-	    'multinomial_logit',
+	    'multi_student_t_cholesky',
 	    'neg_binomial',
 	    'neg_binomial_2',
 	    'neg_binomial_2_log',
@@ -51910,12 +53796,14 @@ function requireStan () {
 	    'skew_double_exponential',
 	    'skew_normal',
 	    'std_normal',
+	    'std_normal_log',
 	    'student_t',
 	    'uniform',
 	    'von_mises',
 	    'weibull',
 	    'wiener',
-	    'wishart'
+	    'wishart',
+	    'wishart_cholesky'
 	  ];
 
 	  const BLOCK_COMMENT = hljs.COMMENT(
@@ -52119,6 +54007,7 @@ Language: STEP Part 21
 Contributors: Adam Joseph Cook <adam.joseph.cook@gmail.com>
 Description: Syntax highlighter for STEP Part 21 files (ISO 10303-21).
 Website: https://en.wikipedia.org/wiki/ISO_10303-21
+Category: syntax
 */
 
 var step21_1;
@@ -52235,12 +54124,12 @@ function requireStylus () {
 	    },
 	    CSS_VARIABLE: {
 	      className: "attr",
-	      begin: /--[A-Za-z][A-Za-z0-9_-]*/
+	      begin: /--[A-Za-z_][A-Za-z0-9_-]*/
 	    }
 	  };
 	};
 
-	const TAGS = [
+	const HTML_TAGS = [
 	  'a',
 	  'abbr',
 	  'address',
@@ -52292,11 +54181,16 @@ function requireStylus () {
 	  'nav',
 	  'object',
 	  'ol',
+	  'optgroup',
+	  'option',
 	  'p',
+	  'picture',
 	  'q',
 	  'quote',
 	  'samp',
 	  'section',
+	  'select',
+	  'source',
 	  'span',
 	  'strong',
 	  'summary',
@@ -52314,6 +54208,58 @@ function requireStylus () {
 	  'var',
 	  'video'
 	];
+
+	const SVG_TAGS = [
+	  'defs',
+	  'g',
+	  'marker',
+	  'mask',
+	  'pattern',
+	  'svg',
+	  'switch',
+	  'symbol',
+	  'feBlend',
+	  'feColorMatrix',
+	  'feComponentTransfer',
+	  'feComposite',
+	  'feConvolveMatrix',
+	  'feDiffuseLighting',
+	  'feDisplacementMap',
+	  'feFlood',
+	  'feGaussianBlur',
+	  'feImage',
+	  'feMerge',
+	  'feMorphology',
+	  'feOffset',
+	  'feSpecularLighting',
+	  'feTile',
+	  'feTurbulence',
+	  'linearGradient',
+	  'radialGradient',
+	  'stop',
+	  'circle',
+	  'ellipse',
+	  'image',
+	  'line',
+	  'path',
+	  'polygon',
+	  'polyline',
+	  'rect',
+	  'text',
+	  'use',
+	  'textPath',
+	  'tspan',
+	  'foreignObject',
+	  'clipPath'
+	];
+
+	const TAGS = [
+	  ...HTML_TAGS,
+	  ...SVG_TAGS,
+	];
+
+	// Sorting, then reversing makes sure longer attributes/elements like
+	// `font-weight` are matched fully instead of getting false positives on say `font`
 
 	const MEDIA_FEATURES = [
 	  'any-hover',
@@ -52350,7 +54296,7 @@ function requireStylus () {
 	  'max-width',
 	  'min-height',
 	  'max-height'
-	];
+	].sort().reverse();
 
 	// https://developer.mozilla.org/en-US/docs/Web/CSS/Pseudo-classes
 	const PSEUDO_CLASSES = [
@@ -52413,7 +54359,7 @@ function requireStylus () {
 	  'valid',
 	  'visited',
 	  'where' // where()
-	];
+	].sort().reverse();
 
 	// https://developer.mozilla.org/en-US/docs/Web/CSS/Pseudo-elements
 	const PSEUDO_ELEMENTS = [
@@ -52431,12 +54377,14 @@ function requireStylus () {
 	  'selection',
 	  'slotted',
 	  'spelling-error'
-	];
+	].sort().reverse();
 
 	const ATTRIBUTES = [
+	  'accent-color',
 	  'align-content',
 	  'align-items',
 	  'align-self',
+	  'alignment-baseline',
 	  'all',
 	  'animation',
 	  'animation-delay',
@@ -52447,6 +54395,7 @@ function requireStylus () {
 	  'animation-name',
 	  'animation-play-state',
 	  'animation-timing-function',
+	  'appearance',
 	  'backface-visibility',
 	  'background',
 	  'background-attachment',
@@ -52458,6 +54407,7 @@ function requireStylus () {
 	  'background-position',
 	  'background-repeat',
 	  'background-size',
+	  'baseline-shift',
 	  'block-size',
 	  'border',
 	  'border-block',
@@ -52504,10 +54454,14 @@ function requireStylus () {
 	  'border-left-width',
 	  'border-radius',
 	  'border-right',
+	  'border-end-end-radius',
+	  'border-end-start-radius',
 	  'border-right-color',
 	  'border-right-style',
 	  'border-right-width',
 	  'border-spacing',
+	  'border-start-end-radius',
+	  'border-start-start-radius',
 	  'border-style',
 	  'border-top',
 	  'border-top-color',
@@ -52523,6 +54477,8 @@ function requireStylus () {
 	  'break-after',
 	  'break-before',
 	  'break-inside',
+	  'cx',
+	  'cy',
 	  'caption-side',
 	  'caret-color',
 	  'clear',
@@ -52530,6 +54486,11 @@ function requireStylus () {
 	  'clip-path',
 	  'clip-rule',
 	  'color',
+	  'color-interpolation',
+	  'color-interpolation-filters',
+	  'color-profile',
+	  'color-rendering',
+	  'color-scheme',
 	  'column-count',
 	  'column-fill',
 	  'column-gap',
@@ -52551,7 +54512,12 @@ function requireStylus () {
 	  'cursor',
 	  'direction',
 	  'display',
+	  'dominant-baseline',
 	  'empty-cells',
+	  'enable-background',
+	  'fill',
+	  'fill-opacity',
+	  'fill-rule',
 	  'filter',
 	  'flex',
 	  'flex-basis',
@@ -52562,6 +54528,8 @@ function requireStylus () {
 	  'flex-wrap',
 	  'float',
 	  'flow',
+	  'flood-color',
+	  'flood-opacity',
 	  'font',
 	  'font-display',
 	  'font-family',
@@ -52583,6 +54551,7 @@ function requireStylus () {
 	  'font-variation-settings',
 	  'font-weight',
 	  'gap',
+	  'glyph-orientation-horizontal',
 	  'glyph-orientation-vertical',
 	  'grid',
 	  'grid-area',
@@ -52609,16 +54578,32 @@ function requireStylus () {
 	  'image-resolution',
 	  'ime-mode',
 	  'inline-size',
+	  'inset',
+	  'inset-block',
+	  'inset-block-end',
+	  'inset-block-start',
+	  'inset-inline',
+	  'inset-inline-end',
+	  'inset-inline-start',
 	  'isolation',
+	  'kerning',
 	  'justify-content',
+	  'justify-items',
+	  'justify-self',
 	  'left',
 	  'letter-spacing',
+	  'lighting-color',
 	  'line-break',
 	  'line-height',
 	  'list-style',
 	  'list-style-image',
 	  'list-style-position',
 	  'list-style-type',
+	  'marker',
+	  'marker-end',
+	  'marker-mid',
+	  'marker-start',
+	  'mask',
 	  'margin',
 	  'margin-block',
 	  'margin-block-end',
@@ -52700,12 +54685,15 @@ function requireStylus () {
 	  'pointer-events',
 	  'position',
 	  'quotes',
+	  'r',
 	  'resize',
 	  'rest',
 	  'rest-after',
 	  'rest-before',
 	  'right',
+	  'rotate',
 	  'row-gap',
+	  'scale',
 	  'scroll-margin',
 	  'scroll-margin-block',
 	  'scroll-margin-block-end',
@@ -52737,11 +54725,23 @@ function requireStylus () {
 	  'shape-image-threshold',
 	  'shape-margin',
 	  'shape-outside',
+	  'shape-rendering',
+	  'stop-color',
+	  'stop-opacity',
+	  'stroke',
+	  'stroke-dasharray',
+	  'stroke-dashoffset',
+	  'stroke-linecap',
+	  'stroke-linejoin',
+	  'stroke-miterlimit',
+	  'stroke-opacity',
+	  'stroke-width',
 	  'speak',
 	  'speak-as',
 	  'src', // @font-face
 	  'tab-size',
 	  'table-layout',
+	  'text-anchor',
 	  'text-align',
 	  'text-align-all',
 	  'text-align-last',
@@ -52749,7 +54749,9 @@ function requireStylus () {
 	  'text-decoration',
 	  'text-decoration-color',
 	  'text-decoration-line',
+	  'text-decoration-skip-ink',
 	  'text-decoration-style',
+	  'text-decoration-thickness',
 	  'text-emphasis',
 	  'text-emphasis-color',
 	  'text-emphasis-position',
@@ -52761,6 +54763,7 @@ function requireStylus () {
 	  'text-rendering',
 	  'text-shadow',
 	  'text-transform',
+	  'text-underline-offset',
 	  'text-underline-position',
 	  'top',
 	  'transform',
@@ -52772,7 +54775,9 @@ function requireStylus () {
 	  'transition-duration',
 	  'transition-property',
 	  'transition-timing-function',
+	  'translate',
 	  'unicode-bidi',
+	  'vector-effect',
 	  'vertical-align',
 	  'visibility',
 	  'voice-balance',
@@ -52791,10 +54796,10 @@ function requireStylus () {
 	  'word-spacing',
 	  'word-wrap',
 	  'writing-mode',
+	  'x',
+	  'y',
 	  'z-index'
-	  // reverse makes sure longer attributes `font-weight` are matched fully
-	  // instead of getting false positives on say `font`
-	].reverse();
+	].sort().reverse();
 
 	/*
 	Language: Stylus
@@ -52803,6 +54808,7 @@ function requireStylus () {
 	Website: https://github.com/stylus/stylus
 	Category: css, web
 	*/
+
 
 	/** @type LanguageFn */
 	function stylus(hljs) {
@@ -52969,7 +54975,8 @@ function requireStylus () {
 	            hljs.QUOTE_STRING_MODE,
 	            modes.CSS_NUMBER_MODE,
 	            hljs.C_BLOCK_COMMENT_MODE,
-	            modes.IMPORTANT
+	            modes.IMPORTANT,
+	            modes.FUNCTION_DISPATCH
 	          ],
 	          illegal: /\./,
 	          relevance: 0
@@ -52988,6 +54995,7 @@ function requireStylus () {
 Language: SubUnit
 Author: Sergey Bronnikov <sergeyb@bronevichok.ru>
 Website: https://pypi.org/project/python-subunit/
+Category: protocols
 */
 
 var subunit_1;
@@ -53138,24 +55146,31 @@ function requireSwift () {
 	  // will result in additional modes being created to scan for those keywords to
 	  // avoid conflicts with other rules
 	  'actor',
+	  'any', // contextual
 	  'associatedtype',
 	  'async',
 	  'await',
 	  /as\?/, // operator
 	  /as!/, // operator
 	  'as', // operator
+	  'borrowing', // contextual
 	  'break',
 	  'case',
 	  'catch',
 	  'class',
+	  'consume', // contextual
+	  'consuming', // contextual
 	  'continue',
 	  'convenience', // contextual
+	  'copy', // contextual
 	  'default',
 	  'defer',
 	  'deinit',
 	  'didSet', // contextual
+	  'distributed',
 	  'do',
 	  'dynamic', // contextual
+	  'each',
 	  'else',
 	  'enum',
 	  'extension',
@@ -53182,6 +55197,7 @@ function requireSwift () {
 	  'nonisolated', // contextual
 	  'lazy', // contextual
 	  'let',
+	  'macro',
 	  'mutating', // contextual
 	  'nonmutating', // contextual
 	  /open\(set\)/, // contextual
@@ -53189,6 +55205,7 @@ function requireSwift () {
 	  'operator',
 	  'optional', // contextual
 	  'override', // contextual
+	  'package',
 	  'postfix', // contextual
 	  'precedencegroup',
 	  'prefix', // contextual
@@ -53266,7 +55283,6 @@ function requireSwift () {
 	  '#line',
 	  '#selector',
 	  '#sourceLocation',
-	  '#warn_unqualified_access',
 	  '#warning'
 	];
 
@@ -53380,13 +55396,16 @@ function requireSwift () {
 
 	// Built-in attributes, which are highlighted as keywords.
 	// @available is handled separately.
+	// https://docs.swift.org/swift-book/documentation/the-swift-programming-language/attributes
 	const keywordAttributes = [
+	  'attached',
 	  'autoclosure',
 	  concat(/convention\(/, either('swift', 'block', 'c'), /\)/),
 	  'discardableResult',
 	  'dynamicCallable',
 	  'dynamicMemberLookup',
 	  'escaping',
+	  'freestanding',
 	  'frozen',
 	  'GKInspectable',
 	  'IBAction',
@@ -53406,10 +55425,13 @@ function requireSwift () {
 	  'propertyWrapper',
 	  'requires_stored_property_inits',
 	  'resultBuilder',
+	  'Sendable',
 	  'testable',
 	  'UIApplicationMain',
+	  'unchecked',
 	  'unknown',
-	  'usableFromInline'
+	  'usableFromInline',
+	  'warn_unqualified_access'
 	];
 
 	// Contextual keywords used in @available and #(un)available.
@@ -53435,6 +55457,7 @@ function requireSwift () {
 	Website: https://swift.org
 	Category: common, system
 	*/
+
 
 	/** @type LanguageFn */
 	function swift(hljs) {
@@ -53602,6 +55625,50 @@ function requireSwift () {
 	    ]
 	  };
 
+	  const REGEXP_CONTENTS = [
+	    hljs.BACKSLASH_ESCAPE,
+	    {
+	      begin: /\[/,
+	      end: /\]/,
+	      relevance: 0,
+	      contains: [ hljs.BACKSLASH_ESCAPE ]
+	    }
+	  ];
+
+	  const BARE_REGEXP_LITERAL = {
+	    begin: /\/[^\s](?=[^/\n]*\/)/,
+	    end: /\//,
+	    contains: REGEXP_CONTENTS
+	  };
+
+	  const EXTENDED_REGEXP_LITERAL = (rawDelimiter) => {
+	    const begin = concat(rawDelimiter, /\//);
+	    const end = concat(/\//, rawDelimiter);
+	    return {
+	      begin,
+	      end,
+	      contains: [
+	        ...REGEXP_CONTENTS,
+	        {
+	          scope: "comment",
+	          begin: `#(?!.*${end})`,
+	          end: /$/,
+	        },
+	      ],
+	    };
+	  };
+
+	  // https://docs.swift.org/swift-book/documentation/the-swift-programming-language/lexicalstructure/#Regular-Expression-Literals
+	  const REGEXP = {
+	    scope: "regexp",
+	    variants: [
+	      EXTENDED_REGEXP_LITERAL('###'),
+	      EXTENDED_REGEXP_LITERAL('##'),
+	      EXTENDED_REGEXP_LITERAL('#'),
+	      BARE_REGEXP_LITERAL
+	    ]
+	  };
+
 	  // https://docs.swift.org/swift-book/ReferenceManual/LexicalStructure.html#ID412
 	  const QUOTED_IDENTIFIER = { match: concat(/`/, identifier, /`/) };
 	  const IMPLICIT_PARAMETER = {
@@ -53621,7 +55688,7 @@ function requireSwift () {
 	  // https://docs.swift.org/swift-book/ReferenceManual/Attributes.html
 	  const AVAILABLE_ATTRIBUTE = {
 	    match: /(@|#(un)?)available/,
-	    className: "keyword",
+	    scope: 'keyword',
 	    starts: { contains: [
 	      {
 	        begin: /\(/,
@@ -53635,14 +55702,17 @@ function requireSwift () {
 	      }
 	    ] }
 	  };
+
 	  const KEYWORD_ATTRIBUTE = {
-	    className: 'keyword',
-	    match: concat(/@/, either(...keywordAttributes))
+	    scope: 'keyword',
+	    match: concat(/@/, either(...keywordAttributes), lookahead(either(/\(/, /\s+/))),
 	  };
+
 	  const USER_DEFINED_ATTRIBUTE = {
-	    className: 'meta',
+	    scope: 'meta',
 	    match: concat(/@/, identifier)
 	  };
+
 	  const ATTRIBUTES = [
 	    AVAILABLE_ATTRIBUTE,
 	    KEYWORD_ATTRIBUTE,
@@ -53708,6 +55778,7 @@ function requireSwift () {
 	      'self',
 	      TUPLE_ELEMENT_NAME,
 	      ...COMMENTS,
+	      REGEXP,
 	      ...KEYWORD_MODES,
 	      ...BUILT_INS,
 	      ...OPERATORS,
@@ -53722,6 +55793,7 @@ function requireSwift () {
 	  const GENERIC_PARAMETERS = {
 	    begin: /</,
 	    end: />/,
+	    keywords: 'repeat each',
 	    contains: [
 	      ...COMMENTS,
 	      TYPE
@@ -53764,9 +55836,10 @@ function requireSwift () {
 	    illegal: /["']/
 	  };
 	  // https://docs.swift.org/swift-book/ReferenceManual/Declarations.html#ID362
-	  const FUNCTION = {
+	  // https://docs.swift.org/swift-book/documentation/the-swift-programming-language/declarations/#Macro-Declaration
+	  const FUNCTION_OR_MACRO = {
 	    match: [
-	      /func/,
+	      /(func|macro)/,
 	      /\s+/,
 	      either(QUOTED_IDENTIFIER.match, identifier, operator)
 	    ],
@@ -53832,6 +55905,37 @@ function requireSwift () {
 	    end: /}/
 	  };
 
+	  const TYPE_DECLARATION = {
+	    begin: [
+	      /(struct|protocol|class|extension|enum|actor)/,
+	      /\s+/,
+	      identifier,
+	      /\s*/,
+	    ],
+	    beginScope: {
+	      1: "keyword",
+	      3: "title.class"
+	    },
+	    keywords: KEYWORDS,
+	    contains: [
+	      GENERIC_PARAMETERS,
+	      ...KEYWORD_MODES,
+	      {
+	        begin: /:/,
+	        end: /\{/,
+	        keywords: KEYWORDS,
+	        contains: [
+	          {
+	            scope: "title.class.inherited",
+	            match: typeIdentifier,
+	          },
+	          ...KEYWORD_MODES,
+	        ],
+	        relevance: 0,
+	      },
+	    ]
+	  };
+
 	  // Add supported submodes to string interpolation.
 	  for (const variant of STRING.variants) {
 	    const interpolation = variant.contains.find(mode => mode.label === "interpol");
@@ -53863,21 +55967,9 @@ function requireSwift () {
 	    keywords: KEYWORDS,
 	    contains: [
 	      ...COMMENTS,
-	      FUNCTION,
+	      FUNCTION_OR_MACRO,
 	      INIT_SUBSCRIPT,
-	      {
-	        beginKeywords: 'struct protocol class extension enum actor',
-	        end: '\\{',
-	        excludeEnd: true,
-	        keywords: KEYWORDS,
-	        contains: [
-	          hljs.inherit(hljs.TITLE_MODE, {
-	            className: "title.class",
-	            begin: /[A-Za-z$_][\u00C0-\u02B80-9A-Za-z$_]*/
-	          }),
-	          ...KEYWORD_MODES
-	        ]
-	      },
+	      TYPE_DECLARATION,
 	      OPERATOR_DECLARATION,
 	      PRECEDENCEGROUP,
 	      {
@@ -53886,6 +55978,7 @@ function requireSwift () {
 	        contains: [ ...COMMENTS ],
 	        relevance: 0
 	      },
+	      REGEXP,
 	      ...KEYWORD_MODES,
 	      ...BUILT_INS,
 	      ...OPERATORS,
@@ -53908,6 +56001,7 @@ Language: Tagger Script
 Author: Philipp Wolfer <ph.wolfer@gmail.com>
 Description: Syntax Highlighting for the Tagger Script as used by MusicBrainz Picard.
 Website: https://picard.musicbrainz.org
+Category: scripting
  */
 
 var taggerscript_1;
@@ -54000,11 +56094,12 @@ function requireYaml () {
 	  const KEY = {
 	    className: 'attr',
 	    variants: [
-	      { begin: '\\w[\\w :\\/.-]*:(?=[ \t]|$)' },
-	      { // double quoted keys
-	        begin: '"\\w[\\w :\\/.-]*":(?=[ \t]|$)' },
-	      { // single quoted keys
-	        begin: '\'\\w[\\w :\\/.-]*\':(?=[ \t]|$)' }
+	      // added brackets support 
+	      { begin: /\w[\w :()\./-]*:(?=[ \t]|$)/ },
+	      { // double quoted keys - with brackets
+	        begin: /"\w[\w :()\./-]*":(?=[ \t]|$)/ },
+	      { // single quoted keys - with brackets
+	        begin: /'\w[\w :()\./-]*':(?=[ \t]|$)/ },
 	    ]
 	  };
 
@@ -54236,6 +56331,7 @@ Language: Tcl
 Description: Tcl is a very simple programming language.
 Author: Radek Liska <radekliska@gmail.com>
 Website: https://www.tcl.tk/about/language.html
+Category: scripting
 */
 
 var tcl_1;
@@ -54520,6 +56616,7 @@ function requireThrift () {
 Language: TP
 Author: Jay Strybis <jay.strybis@gmail.com>
 Description: FANUC TP programming language (TPP).
+Category: hardware
 */
 
 var tp_1;
@@ -55118,6 +57215,7 @@ function requireTypescript () {
 	  "window",
 	  "document",
 	  "localStorage",
+	  "sessionStorage",
 	  "module",
 	  "global" // Node.js
 	];
@@ -55134,6 +57232,7 @@ function requireTypescript () {
 	Category: common, scripting, web
 	Website: https://developer.mozilla.org/en-US/docs/Web/JavaScript
 	*/
+
 
 	/** @type LanguageFn */
 	function javascript(hljs) {
@@ -55175,7 +57274,8 @@ function requireTypescript () {
 	        nextChar === "<" ||
 	        // the , gives away that this is not HTML
 	        // `<T, A extends keyof T, V>`
-	        nextChar === ",") {
+	        nextChar === ","
+	        ) {
 	        response.ignoreMatch();
 	        return;
 	      }
@@ -55193,10 +57293,18 @@ function requireTypescript () {
 	      // `<blah />` (self-closing)
 	      // handled by simpleSelfClosing rule
 
+	      let m;
+	      const afterMatch = match.input.substring(afterMatchIndex);
+
+	      // some more template typing stuff
+	      //  <T = any>(key?: string) => Modify<
+	      if ((m = afterMatch.match(/^\s*=/))) {
+	        response.ignoreMatch();
+	        return;
+	      }
+
 	      // `<From extends string>`
 	      // technically this could be HTML, but it smells like a type
-	      let m;
-	      const afterMatch = match.input.substr(afterMatchIndex);
 	      // NOTE: This is ugh, but added specifically for https://github.com/highlightjs/highlight.js/issues/3276
 	      if ((m = afterMatch.match(/^\s+extends\s+/))) {
 	        if (m.index === 0) {
@@ -55252,7 +57360,7 @@ function requireTypescript () {
 	    contains: [] // defined later
 	  };
 	  const HTML_TEMPLATE = {
-	    begin: 'html`',
+	    begin: '\.?html`',
 	    end: '',
 	    starts: {
 	      end: '`',
@@ -55265,7 +57373,7 @@ function requireTypescript () {
 	    }
 	  };
 	  const CSS_TEMPLATE = {
-	    begin: 'css`',
+	    begin: '\.?css`',
 	    end: '',
 	    starts: {
 	      end: '`',
@@ -55275,6 +57383,19 @@ function requireTypescript () {
 	        SUBST
 	      ],
 	      subLanguage: 'css'
+	    }
+	  };
+	  const GRAPHQL_TEMPLATE = {
+	    begin: '\.?gql`',
+	    end: '',
+	    starts: {
+	      end: '`',
+	      returnEnd: false,
+	      contains: [
+	        hljs.BACKSLASH_ESCAPE,
+	        SUBST
+	      ],
+	      subLanguage: 'graphql'
 	    }
 	  };
 	  const TEMPLATE_STRING = {
@@ -55338,7 +57459,10 @@ function requireTypescript () {
 	    hljs.QUOTE_STRING_MODE,
 	    HTML_TEMPLATE,
 	    CSS_TEMPLATE,
+	    GRAPHQL_TEMPLATE,
 	    TEMPLATE_STRING,
+	    // Skip numbers when they are part of a variable name
+	    { match: /\$\d+/ },
 	    NUMBER,
 	    // This is intentional:
 	    // See https://github.com/highlightjs/highlight.js/issues/3288
@@ -55359,7 +57483,7 @@ function requireTypescript () {
 	  const PARAMS_CONTAINS = SUBST_AND_COMMENTS.concat([
 	    // eat recursive parens in sub expressions
 	    {
-	      begin: /\(/,
+	      begin: /(\s*)\(/,
 	      end: /\)/,
 	      keywords: KEYWORDS$1,
 	      contains: ["self"].concat(SUBST_AND_COMMENTS)
@@ -55367,7 +57491,8 @@ function requireTypescript () {
 	  ]);
 	  const PARAMS = {
 	    className: 'params',
-	    begin: /\(/,
+	    // convert this to negative lookbehind in v12
+	    begin: /(\s*)\(/, // to match the parms with 
 	    end: /\)/,
 	    excludeBegin: true,
 	    excludeEnd: true,
@@ -55488,9 +57613,10 @@ function requireTypescript () {
 	      /\b/,
 	      noneOf([
 	        ...BUILT_IN_GLOBALS,
-	        "super"
-	      ]),
-	      IDENT_RE$1, regex.lookahead(/\(/)),
+	        "super",
+	        "import"
+	      ].map(x => `${x}\\s*\\(`)),
+	      IDENT_RE$1, regex.lookahead(/\s*\(/)),
 	    className: "title.function",
 	    relevance: 0
 	  };
@@ -55552,7 +57678,7 @@ function requireTypescript () {
 	  };
 
 	  return {
-	    name: 'Javascript',
+	    name: 'JavaScript',
 	    aliases: ['js', 'jsx', 'mjs', 'cjs'],
 	    keywords: KEYWORDS$1,
 	    // this will be extended by TypeScript
@@ -55569,8 +57695,11 @@ function requireTypescript () {
 	      hljs.QUOTE_STRING_MODE,
 	      HTML_TEMPLATE,
 	      CSS_TEMPLATE,
+	      GRAPHQL_TEMPLATE,
 	      TEMPLATE_STRING,
 	      COMMENT,
+	      // Skip numbers when they are part of a variable name
+	      { match: /\$\d+/ },
 	      NUMBER,
 	      CLASS_REFERENCE,
 	      {
@@ -55608,7 +57737,7 @@ function requireTypescript () {
 	                    skip: true
 	                  },
 	                  {
-	                    begin: /\(/,
+	                    begin: /(\s*)\(/,
 	                    end: /\)/,
 	                    excludeBegin: true,
 	                    excludeEnd: true,
@@ -55714,6 +57843,7 @@ function requireTypescript () {
 	Category: common, scripting
 	*/
 
+
 	/** @type LanguageFn */
 	function typescript(hljs) {
 	  const tsLanguage = javascript(hljs);
@@ -55732,10 +57862,15 @@ function requireTypescript () {
 	    "unknown"
 	  ];
 	  const NAMESPACE = {
-	    beginKeywords: 'namespace',
-	    end: /\{/,
-	    excludeEnd: true,
-	    contains: [ tsLanguage.exports.CLASS_REFERENCE ]
+	    begin: [
+	      /namespace/,
+	      /\s+/,
+	      hljs.IDENT_RE
+	    ],
+	    beginScope: {
+	      1: "keyword",
+	      3: "title.class"
+	    }
 	  };
 	  const INTERFACE = {
 	    beginKeywords: 'interface',
@@ -55754,7 +57889,7 @@ function requireTypescript () {
 	  };
 	  const TS_SPECIFIC_KEYWORDS = [
 	    "type",
-	    "namespace",
+	    // "namespace",
 	    "interface",
 	    "public",
 	    "private",
@@ -55764,8 +57899,16 @@ function requireTypescript () {
 	    "abstract",
 	    "readonly",
 	    "enum",
-	    "override"
+	    "override",
+	    "satisfies"
 	  ];
+
+	  /*
+	    namespace is a TS keyword but it's fine to use it as a variable name too.
+	    const message = 'foo';
+	    const namespace = 'bar';
+	  */
+
 	  const KEYWORDS$1 = {
 	    $pattern: IDENT_RE,
 	    keyword: KEYWORDS.concat(TS_SPECIFIC_KEYWORDS),
@@ -55791,6 +57934,13 @@ function requireTypescript () {
 	  Object.assign(tsLanguage.keywords, KEYWORDS$1);
 
 	  tsLanguage.exports.PARAMS_CONTAINS.push(DECORATOR);
+
+	  // highlight the function params
+	  const ATTRIBUTE_HIGHLIGHT = tsLanguage.contains.find(c => c.className === "attr");
+	  tsLanguage.exports.PARAMS_CONTAINS.push([
+	    tsLanguage.exports.CLASS_REFERENCE, // class reference for highlighting the params types
+	    ATTRIBUTE_HIGHLIGHT, // highlight the params key
+	  ]);
 	  tsLanguage.contains = tsLanguage.contains.concat([
 	    DECORATOR,
 	    NAMESPACE,
@@ -55809,7 +57959,9 @@ function requireTypescript () {
 	    name: 'TypeScript',
 	    aliases: [
 	      'ts',
-	      'tsx'
+	      'tsx',
+	      'mts',
+	      'cts'
 	    ]
 	  });
 
@@ -55825,6 +57977,7 @@ Language: Vala
 Author: Antono Vasiljev <antono.vasiljev@gmail.com>
 Description: Vala is a new programming language that aims to bring modern programming language features to GNOME developers without imposing any additional runtime requirements and without using a different ABI compared to applications and libraries written in C.
 Website: https://wiki.gnome.org/Projects/Vala
+Category: system
 */
 
 var vala_1;
@@ -56323,6 +58476,7 @@ Author: Jon Evans <jon@craftyjon.com>
 Contributors: Boone Severson <boone.severson@gmail.com>
 Description: Verilog is a hardware description language used in electronic design automation to describe digital and mixed-signal systems. This highlighter supports Verilog and SystemVerilog through IEEE 1800-2012.
 Website: http://www.verilog.com
+Category: hardware
 */
 
 var verilog_1;
@@ -56881,6 +59035,7 @@ Author: Igor Kalnitsky <igor@kalnitsky.org>
 Contributors: Daniel C.K. Kho <daniel.kho@tauhop.com>, Guillaume Savaton <guillaume.savaton@eseo.fr>
 Description: VHDL is a hardware description language used in electronic design automation to describe digital and mixed-signal systems.
 Website: https://en.wikipedia.org/wiki/VHDL
+Category: hardware
 */
 
 var vhdl_1;
@@ -57241,7 +59396,7 @@ function requireVim () {
 Language: WebAssembly
 Website: https://webassembly.org
 Description:  Wasm is designed as a portable compilation target for programming languages, enabling deployment on the web for client and server applications.
-Category: web
+Category: web, common
 Audit: 2020
 */
 
@@ -58422,7 +60577,8 @@ function requireXquery () {
 	    name: 'XQuery',
 	    aliases: [
 	      'xpath',
-	      'xq'
+	      'xq',
+	      'xqm'
 	    ],
 	    case_insensitive: false,
 	    illegal: /(proc)|(abstract)|(extends)|(until)|(#)/,
@@ -58445,6 +60601,7 @@ function requireXquery () {
  Description: Zephir, an open source, high-level language designed to ease the creation and maintainability of extensions for PHP with a focus on type and memory safety.
  Author: Oleg Efimov <efimovov@gmail.com>
  Website: https://zephir-lang.com/en
+ Category: web
  Audit: 2020
  */
 
@@ -58846,6 +61003,24 @@ class HighlightedCode extends HTMLTextAreaElement {
       });
     }
     theme.href = name.includes('.') ? name : `https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.5.0/styles/${name}.min.css`;
+  }
+
+  static changeTheme(name) {
+    if (!theme) {
+      useTheme(name);
+    } else {
+      const replace = document.head.appendChild(
+        document.createElement('link')
+      );
+      replace.rel = 'stylesheet';
+      replace.addEventListener('load', () => {
+        for (const textarea of document.querySelectorAll(`textarea[is="${TAG}"]`))
+          _backgroundColor.call(textarea);
+      });
+      replace.href = name.includes('.') ? name : `https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.5.0/styles/${name}.min.css`;
+      document.head.removeChild(theme);
+      theme = replace;
+    }
   }
 
   constructor() {

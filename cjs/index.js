@@ -73,6 +73,24 @@ class HighlightedCode extends HTMLTextAreaElement {
     theme.href = name.includes('.') ? name : `https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.5.0/styles/${name}.min.css`;
   }
 
+  static changeTheme(name) {
+    if (!theme) {
+      useTheme(name);
+    } else {
+      const replace = document.head.appendChild(
+        document.createElement('link')
+      );
+      replace.rel = 'stylesheet';
+      replace.addEventListener('load', () => {
+        for (const textarea of document.querySelectorAll(`textarea[is="${TAG}"]`))
+          _backgroundColor.call(textarea);
+      });
+      replace.href = name.includes('.') ? name : `https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.5.0/styles/${name}.min.css`;
+      document.head.removeChild(theme);
+      theme = replace;
+    }
+  }
+
   constructor() {
     super();
     this.idle = 0;
